@@ -3705,9 +3705,9 @@
                     <button class="perf-toggle" id="perfToggleKK" onclick="setPerfWeapon('kk')">🎯 KK</button>
                   </div>
                 </div>
-                <div class="perf-chart-box">
-                  <canvas id="perfChart"></canvas>
-                  <div class="perf-chart-empty" id="perfChartEmpty">Noch keine Daten.<br>Spiel ein Duell!</div>
+                <div class="perf-chart-box" style="height:160px;position:relative;width:100%;">
+                  <canvas id="perfChart" style="display:block;"></canvas>
+                  <div class="perf-chart-empty" id="perfChartEmpty" style="display:flex;">Noch keine Daten.<br>Spiel ein Duell!</div>
                 </div>
               </div>
 
@@ -4385,6 +4385,8 @@
       } else {
         refreshProfileSheet();
         ov.classList.add('active');
+        // Chart erst rendern nachdem Overlay sichtbar ist (Canvas hat dann echte Größe)
+        requestAnimationFrame(() => requestAnimationFrame(() => renderPerformanceChart()));
       }
     }
 
@@ -4400,6 +4402,7 @@
       document.querySelectorAll('.ps-panel').forEach(p => p.classList.toggle('active', p.id === 'psPanel-' + tab));
       if (tab === 'sun') renderSunGrid();
       if (tab === 'history') renderHistory();
+      if (tab === 'stats') requestAnimationFrame(() => renderPerformanceChart());
     }
 
     function refreshProfileSheet() {
@@ -4459,9 +4462,6 @@
         if (t === 'sun') renderSunGrid();
         if (t === 'history') renderHistory();
       }
-      // Chart immer rendern, aber erst nach dem nächsten Paint damit
-      // der Canvas seine tatsächliche Größe hat (verhindert leeren Graph)
-      requestAnimationFrame(() => renderPerformanceChart());
     }
 
     /* ─── GAME STATS (localStorage) ─────────── */
@@ -4596,10 +4596,19 @@
         .slice(0, 15)
         .reverse();
 
-      // Empty-State
+      // Empty-State — zeige auch wenn keine Daten, aber mit Hinweis
       if (filtered.length === 0) {
         canvas.style.display = 'none';
-        if (emptyEl) emptyEl.style.display = 'flex';
+        if (emptyEl) {
+          emptyEl.style.display = 'flex';
+          // Zeige ob überhaupt History-Daten vorhanden sind
+          const totalHist = hist.length;
+          const otherWeapon = _perfWeapon === 'lg' ? 'KK' : 'LG';
+          const otherCount  = hist.filter(h => h.weapon !== _perfWeapon && h.playerPts != null).length;
+          emptyEl.innerHTML = totalHist === 0
+            ? 'Noch keine Daten.<br><span style="font-size:.6rem;opacity:.5;">Spiel ein Duell und gib dein Ergebnis ein!</span>'
+            : `Keine ${_perfWeapon.toUpperCase()}-Daten.<br><span style="font-size:.6rem;opacity:.5;">${otherCount} ${otherWeapon}-Einträge vorhanden → Toggle wechseln</span>`;
+        }
         return;
       }
       canvas.style.display = '';
