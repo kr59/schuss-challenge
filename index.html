@@ -757,11 +757,11 @@
     .perf-chart-box {
       position: relative;
       height: 160px;
+      width: 100%;
     }
 
-    .perf-chart-box canvas {
-      width: 100% !important;
-      height: 100% !important;
+    #perfChart {
+      display: block;
     }
 
     .perf-chart-empty {
@@ -4458,10 +4458,10 @@
         const t = activeTab.dataset.tab;
         if (t === 'sun') renderSunGrid();
         if (t === 'history') renderHistory();
-        if (t === 'stats') renderPerformanceChart();
       }
-      // Stats-Tab ist default-aktiv → immer rendern
-      if (!activeTab || activeTab.dataset.tab === 'stats') renderPerformanceChart();
+      // Chart immer rendern, aber erst nach dem nächsten Paint damit
+      // der Canvas seine tatsächliche Größe hat (verhindert leeren Graph)
+      requestAnimationFrame(() => renderPerformanceChart());
     }
 
     /* ─── GAME STATS (localStorage) ─────────── */
@@ -4605,8 +4605,8 @@
       canvas.style.display = '';
       if (emptyEl) emptyEl.style.display = 'none';
 
-      const isKK   = _perfWeapon === 'kk';
-      const accent = isKK ? '#f0c840' : '#7ab030';
+      const isKK      = _perfWeapon === 'kk';
+      const accent    = isKK ? '#f0c840' : '#7ab030';
       const accentRgb = isKK ? '240,200,64' : '122,176,48';
 
       // Werte: KK = Ganzzahl, LG = eine Nachkommastelle
@@ -4616,7 +4616,7 @@
              : Math.round(parseFloat(h.playerPts) * 10) / 10
       );
 
-      // Sinnvolle Y-Achsen-Grenzen: ±5% um den Wertebereich
+      // Sinnvolle Y-Achsen-Grenzen
       const minVal = Math.min(...values);
       const maxVal = Math.max(...values);
       const pad    = Math.max((maxVal - minVal) * 0.15, isKK ? 3 : 2);
@@ -4630,9 +4630,10 @@
         return accent;
       });
 
-      // Gradient-Fill
-      const ctx2d = canvas.getContext('2d');
-      const grad  = ctx2d.createLinearGradient(0, 0, 0, canvas.offsetHeight || 160);
+      // Gradient-Fill — feste Höhe 160 damit er auch vor erstem Paint funktioniert
+      const ctx2d  = canvas.getContext('2d');
+      const boxH   = canvas.parentElement?.offsetHeight || 160;
+      const grad   = ctx2d.createLinearGradient(0, 0, 0, boxH);
       grad.addColorStop(0, `rgba(${accentRgb},.22)`);
       grad.addColorStop(1, `rgba(${accentRgb},0)`);
 
