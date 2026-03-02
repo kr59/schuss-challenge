@@ -16,9 +16,9 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@300;400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap"
     rel="stylesheet">
-  <!-- Firebase v9 Compat SDK -->
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+  <!-- Firebase v9 Compat SDK (async – initFirebaseWithRetry wartet auf Laden) -->
+  <script async src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script async src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
   <style>
     /* ═══════════════════════════════════════════
    BASE
@@ -4637,26 +4637,29 @@
       // Status-Badge
       updateLbStatusBadge();
 
-      if (!fbReady) {
-        list.innerHTML = '<div class="lb-empty">🔌 Offline – Bestenliste nicht verfügbar.</div>';
-        return;
-      }
-
       list.innerHTML = '<div class="lb-loading">⏳ Lade Rangliste...</div>';
 
-      // Score-Feld ist in Firebase gespeichert → nach score sortieren
-      fbDb.ref('leaderboard_v2').orderByChild('score').limitToLast(25).once('value')
+      // Warte bis Firebase bereit (max. 3s), dann lade
+      const tryLoad = (attempts) => {
+        if (!fbReady) {
+          if (attempts > 0) { setTimeout(() => tryLoad(attempts - 1), 300); return; }
+          list.innerHTML = '<div class="lb-empty">🔌 Offline – Bestenliste nicht verfügbar.</div>';
+          return;
+        }
+        fbDb.ref('leaderboard_v2').limitToLast(50).once('value')
         .then(snap => {
           const entries = [];
           snap.forEach(child => { entries.push(child.val()); });
-          // Fallback: falls ältere Einträge kein score-Feld haben, berechnen
           entries.forEach(e => { if (!e.score) e.score = (e.xp || 0) + (e.streak || 0) * 5; });
           entries.sort((a, b) => b.score - a.score);
-          renderLeaderboard(entries);
+          renderLeaderboard(entries.slice(0, 25));
         })
-        .catch(() => {
-          list.innerHTML = '<div class="lb-empty">⚠️ Fehler beim Laden.</div>';
+        .catch(err => {
+          console.error('Leaderboard load error:', err?.code, err?.message);
+          list.innerHTML = '<div class="lb-empty">⚠️ Fehler beim Laden.<br><span style="font-size:.6rem;opacity:.5;">' + (err?.code || '') + '</span></div>';
         });
+      };
+      tryLoad(10);
     }
 
     function renderLeaderboard(entries) {
@@ -6418,7 +6421,18 @@
     drawTarget([]);
     loadXP();
     updateSchuetzenpass();
-    initFirebase();
+
+    // Firebase SDK könnte noch nicht geladen sein → mit Retry initialisieren
+    function initFirebaseWithRetry(attempts) {
+      if (typeof firebase !== 'undefined' && firebase.apps !== undefined) {
+        initFirebase();
+      } else if (attempts > 0) {
+        setTimeout(() => initFirebaseWithRetry(attempts - 1), 300);
+      } else {
+        console.warn('Firebase SDK nicht geladen.');
+      }
+    }
+    initFirebaseWithRetry(10);
     checkSunAchievements(); // Check on load in case new achievements unlocked
 
     // Check Welcome screen on init
