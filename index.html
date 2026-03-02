@@ -19,6 +19,8 @@
   <!-- Firebase v9 Compat SDK (async – initFirebaseWithRetry wartet auf Laden) -->
   <script async src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
   <script async src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
     /* ═══════════════════════════════════════════
    BASE
@@ -695,6 +697,84 @@
       text-transform: uppercase;
       color: rgba(190, 140, 255, .35);
       text-align: right;
+    }
+
+    /* ── Leistungskurve ──────────────────────── */
+    .perf-chart-wrap {
+      margin-top: 18px;
+      background: rgba(255, 255, 255, .03);
+      border: 1px solid rgba(255, 255, 255, .07);
+      border-radius: 14px;
+      padding: 14px 14px 12px;
+    }
+
+    .perf-chart-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .perf-chart-title {
+      font-size: .52rem;
+      letter-spacing: .22em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, .28);
+      font-weight: 600;
+    }
+
+    .perf-toggle-group {
+      display: flex;
+      gap: 5px;
+    }
+
+    .perf-toggle {
+      font-size: .58rem;
+      font-family: 'Outfit', sans-serif;
+      font-weight: 600;
+      letter-spacing: .06em;
+      padding: 4px 11px;
+      border-radius: 20px;
+      border: 1px solid rgba(255, 255, 255, .12);
+      background: transparent;
+      color: rgba(255, 255, 255, .35);
+      cursor: pointer;
+      transition: all .18s;
+    }
+
+    .perf-toggle.active[id="perfToggleLG"] {
+      background: rgba(122, 176, 48, .15);
+      border-color: rgba(122, 176, 48, .5);
+      color: #7ab030;
+    }
+
+    .perf-toggle.active[id="perfToggleKK"] {
+      background: rgba(240, 200, 64, .12);
+      border-color: rgba(240, 200, 64, .45);
+      color: #f0c840;
+    }
+
+    .perf-chart-box {
+      position: relative;
+      height: 160px;
+    }
+
+    .perf-chart-box canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    .perf-chart-empty {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-size: .68rem;
+      color: rgba(255, 255, 255, .2);
+      line-height: 1.6;
+      pointer-events: none;
     }
 
     /* ═══════════════════════════════════════════
@@ -3616,6 +3696,21 @@
                 </div>
               </div>
 
+              <!-- Leistungskurve -->
+              <div class="perf-chart-wrap">
+                <div class="perf-chart-header">
+                  <span class="perf-chart-title">◈ LEISTUNGSKURVE</span>
+                  <div class="perf-toggle-group">
+                    <button class="perf-toggle active" id="perfToggleLG" onclick="setPerfWeapon('lg')">🌬️ LG</button>
+                    <button class="perf-toggle" id="perfToggleKK" onclick="setPerfWeapon('kk')">🎯 KK</button>
+                  </div>
+                </div>
+                <div class="perf-chart-box">
+                  <canvas id="perfChart"></canvas>
+                  <div class="perf-chart-empty" id="perfChartEmpty">Noch keine Daten.<br>Spiel ein Duell!</div>
+                </div>
+              </div>
+
               <!-- Reset Button -->
               <div style="margin-top:24px; text-align:center; padding-bottom:10px;">
                 <button class="btn-sec"
@@ -4363,7 +4458,10 @@
         const t = activeTab.dataset.tab;
         if (t === 'sun') renderSunGrid();
         if (t === 'history') renderHistory();
+        if (t === 'stats') renderPerformanceChart();
       }
+      // Stats-Tab ist default-aktiv → immer rendern
+      if (!activeTab || activeTab.dataset.tab === 'stats') renderPerformanceChart();
     }
 
     /* ─── GAME STATS (localStorage) ─────────── */
@@ -4460,6 +4558,128 @@
     }
 
     /* ─── SUN SYSTEM ─────────────────────────── */
+    /* ─── LEISTUNGSKURVE (Chart.js) ─────────────────────────────────────── */
+    let _perfChart = null;          // Chart.js Instanz
+    let _perfWeapon = 'lg';         // aktiver Toggle: 'lg' | 'kk'
+
+    function setPerfWeapon(w) {
+      _perfWeapon = w;
+      document.getElementById('perfToggleLG')?.classList.toggle('active', w === 'lg');
+      document.getElementById('perfToggleKK')?.classList.toggle('active', w === 'kk');
+      renderPerformanceChart();
+    }
+
+    function renderPerformanceChart() {
+      const canvas  = document.getElementById('perfChart');
+      const emptyEl = document.getElementById('perfChartEmpty');
+      if (!canvas) return;
+
+      // Daten aus sd_history lesen, nach Waffe filtern, älteste zuerst
+      let hist = [];
+      try { hist = JSON.parse(localStorage.getItem('sd_history') || '[]'); } catch (e) { }
+
+      const filtered = hist
+        .filter(h => h.weapon === _perfWeapon && h.playerPts != null)
+        .slice(0, 20)          // max. 20 Einträge
+        .reverse();            // älteste links
+
+      // Leeres State
+      if (filtered.length === 0) {
+        canvas.style.display = 'none';
+        if (emptyEl) emptyEl.style.display = 'flex';
+        if (_perfChart) { _perfChart.destroy(); _perfChart = null; }
+        return;
+      }
+      canvas.style.display = '';
+      if (emptyEl) emptyEl.style.display = 'none';
+
+      const isKK    = _perfWeapon === 'kk';
+      const accent  = isKK ? '#f0c840' : '#7ab030';
+      const accentA = isKK ? 'rgba(240,200,64,.18)' : 'rgba(122,176,48,.18)';
+      const accentB = isKK ? 'rgba(240,200,64,0)'   : 'rgba(122,176,48,0)';
+
+      const labels = filtered.map(h => h.date || '');
+      const values = filtered.map(h => isKK ? Math.round(parseFloat(h.playerPts)) : parseFloat(h.playerPts));
+
+      // Gradient
+      const ctx2d = canvas.getContext('2d');
+      const grad  = ctx2d.createLinearGradient(0, 0, 0, 160);
+      grad.addColorStop(0, accentA);
+      grad.addColorStop(1, accentB);
+
+      const data = {
+        labels,
+        datasets: [{
+          label: isKK ? 'KK (Ringe)' : 'LG (Zehntel)',
+          data: values,
+          borderColor: accent,
+          borderWidth: 2,
+          pointBackgroundColor: accent,
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          fill: true,
+          backgroundColor: grad,
+          tension: 0.35,
+        }]
+      };
+
+      const options = {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 350 },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: 'rgba(10,20,6,.92)',
+            borderColor: accent,
+            borderWidth: 1,
+            titleColor: 'rgba(255,255,255,.55)',
+            bodyColor: accent,
+            titleFont: { family: 'Outfit', size: 10 },
+            bodyFont:  { family: 'DM Mono', size: 13, weight: '700' },
+            padding: 10,
+            callbacks: {
+              title: items => items[0].label,
+              label: item => isKK
+                ? ` ${item.raw} Ringe`
+                : ` ${item.raw.toFixed(1)} Zehntel`,
+            }
+          }
+        },
+        scales: {
+          x: {
+            ticks: {
+              color: 'rgba(255,255,255,.2)',
+              font: { family: 'Outfit', size: 9 },
+              maxRotation: 35,
+              autoSkip: true,
+              maxTicksLimit: 6,
+            },
+            grid: { color: 'rgba(255,255,255,.04)' },
+            border: { color: 'rgba(255,255,255,.06)' },
+          },
+          y: {
+            ticks: {
+              color: 'rgba(255,255,255,.25)',
+              font: { family: 'DM Mono', size: 9 },
+              maxTicksLimit: 5,
+            },
+            grid: { color: 'rgba(255,255,255,.05)' },
+            border: { color: 'rgba(255,255,255,.06)' },
+          }
+        }
+      };
+
+      if (_perfChart) {
+        // Update bestehende Instanz (kein Flackern)
+        _perfChart.data    = data;
+        _perfChart.options = options;
+        _perfChart.update('none');
+      } else {
+        _perfChart = new Chart(ctx2d, { type: 'line', data, options });
+      }
+    }
+
     const SUN_ACHIEVEMENTS = [
       // Basic
       { id: 'first_game', group: 'basic', icon: '🎯', name: 'Erster Schuss', desc: '1 Duell gespielt', check: () => (loadGameStats().wins || 0) + (loadGameStats().losses || 0) + (loadGameStats().draws || 0) >= 1 },
