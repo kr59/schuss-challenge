@@ -465,55 +465,10 @@ window.ImageCompare = (function () {
         margin-top: 12px;
       }
 
-      /* AI Tips Section */
-      .ic-tips-card {
-        margin-top: 16px;
-        background: rgba(120,180,40,.05);
-        border: 1px solid rgba(120,180,40,.2);
-        border-radius: 12px;
-        padding: 14px;
-        text-align: left;
-      }
-      .ic-tips-header {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-family: 'Outfit', sans-serif;
-        font-size: .85rem;
-        font-weight: 600;
-        color: rgba(200,230,120,.9);
-        margin-bottom: 10px;
-        letter-spacing: .05em;
-      }
-      .ic-tips-header .ai-badge {
-        background: rgba(120,180,40,.2);
-        color: #a0e060;
-        font-size: .6rem;
-        padding: 2px 6px;
-        border-radius: 4px;
-        letter-spacing: .1em;
-      }
-      .ic-tip {
-        font-size: .75rem;
-        color: rgba(255,255,255,.7);
-        line-height: 1.5;
-        margin-bottom: 8px;
-        padding-left: 14px;
-        position: relative;
-      }
-      .ic-tip::before {
-        content: '•';
-        position: absolute;
-        left: 2px;
-        top: 0;
-        color: rgba(120,180,40,.7);
-      }
-      .ic-tip:last-child { margin-bottom: 0; }
-
       /* Submit Button */
       .ic-submit-btn {
         width: 100%;
-        margin-top: 16px;
+        margin-top: 20px;
         padding: 14px;
         background: linear-gradient(135deg, #7ab030, #5a8c1e);
         border: 1px solid #8ecf40;
@@ -1185,19 +1140,8 @@ window.ImageCompare = (function () {
         <div class="ic-bar-bot" style="width:${botPct}%"></div>
       </div>
       <div class="ic-comp-diff ${resultClass}">${diffText}</div>
-      
-      <!-- AI Tips -->
-      <div class="ic-tips-card">
-        <div class="ic-tips-header">
-          <span>🧠 KI-ANALYSE</span>
-          <span class="ai-badge">BETA</span>
-        </div>
-        <div id="icTipsContent">
-          ${generateTips(playerScore, isKK, resultClass)}
-        </div>
-      </div>
 
-      <!-- Let's Go Button -->
+      <!-- Submit Button -->
       <button class="ic-submit-btn" id="icSubmitBtn">
         ✅ ERGEBNIS ÜBERNEHMEN
       </button>
@@ -1214,21 +1158,25 @@ window.ImageCompare = (function () {
         const submitBtn = comparison.querySelector('#icSubmitBtn');
         submitBtn.addEventListener('click', () => {
             closeOverlay();
-            if (typeof DOM !== 'undefined' && typeof showGameOver === 'function') {
-                // Populate input fields in the entry screen
-                if (isKK) {
-                    DOM.playerInpInt.value = Math.floor(playerScore);
-                } else {
-                    DOM.playerInp.value = playerScore.toFixed(1);
-                    DOM.playerInpInt.value = Math.floor(playerScore); // Ganze ringe auch setzen
+
+            // Get inputs directly from document to be safe
+            const playerInp = document.getElementById('playerInp');
+            const playerInpInt = document.getElementById('playerInpInt');
+            const calcFunc = window.calcResult || (typeof calcResult === 'function' ? calcResult : null);
+
+            if (playerInp || playerInpInt) {
+                if (isKK && playerInpInt) {
+                    playerInpInt.value = Math.floor(playerScore);
+                } else if (!isKK) {
+                    if (playerInp) playerInp.value = playerScore.toFixed(1);
+                    if (playerInpInt) playerInpInt.value = Math.floor(playerScore);
                 }
 
-                // Directly trigger the result calculation
-                if (typeof calcResult === 'function') {
-                    calcResult();
-                } else {
-                    // Fallback to showGameOver directly
-                    showGameOver(playerScore, botScore, null, Math.floor(playerScore));
+                // Directly trigger the result calculation in index.html
+                if (typeof calcFunc === 'function') {
+                    calcFunc();
+                } else if (typeof window.showGameOver === 'function') {
+                    window.showGameOver(playerScore, botScore, null, Math.floor(playerScore));
                 }
             }
         });
@@ -1253,52 +1201,6 @@ window.ImageCompare = (function () {
     /* ─── UTILITIES ──────────────────────────── */
     function delay(ms) {
         return new Promise(r => setTimeout(r, ms));
-    }
-
-    // Professional shooting tips based on score and discipline
-    function generateTips(score, isKK, resultClass) {
-        // Assume 40 shots max score 436.0 (LG), 400 (KK)
-        const avg = isKK ? (score / 40) : (score / 40);
-        let tips = [];
-
-        if (!isKK) {
-            // Luftgewehr (LG)
-            if (avg >= 10.3) {
-                tips.push('Wahnsinns-Niveau! Dein Halteraum ist makellos ruhig. Fokus jetzt voll auf mentale Stärke für die nächsten Wettkämpfe.');
-                tips.push('Achte darauf, bei solch hohen Serien nicht zu passiv am Abzug zu werden. Trau dich, den perfekten Schuss mutig auszulösen.');
-            } else if (avg >= 9.8) {
-                tips.push('Starkes Ergebnis! Um konstant über 10 zu bleiben: Optimiere deine Nullpunkt-Kontrolle vor jedem Schuss.');
-                tips.push('Arbeite am blitzsauberen Nachhalten (Follow-through) – bleib nach dem Schuss noch 2 Sekunden stabil im Zielbild.');
-            } else if (avg >= 9.0) {
-                tips.push('Solide Basis! Wenn Ausreißer in die 8 oder tiefere 9 gehen: Überprüfe deinen Stand. Stehst du entspannt im Knochenbau?');
-                tips.push('Achte auf eine gleichmäßige Atmung. Das Ausatmen vor dem Zielvorgang muss immer gleich lang und entspannt sein.');
-            } else {
-                tips.push('Fokusiere dich im nächsten Training auf die Basics: Konzentriere dich nur auf ein sauberes, klares Korn, nicht auf die Scheibe.');
-                tips.push('Kontrolliere den Abzugsfinger: Ziehe nicht ruckartig, sondern erhöhe den Druck linear, bis der Schuss von alleine bricht.');
-            }
-        } else {
-            // Kleinkaliber (KK)
-            if (avg >= 9.7) {
-                tips.push('Hervorragend Ringzahl im KK! Deine Anschlagsstabilität ist exzellent.');
-                tips.push('Bleib bei Windböen souverän: Vermeide langes Zielen und nutze die ruhigen Phasen (Windlücken) konsequent aus.');
-            } else if (avg >= 9.0) {
-                tips.push('Gute Serie! KK verzeiht keine Fehler in der Schulter. Achte darauf, dass das Gewehr immer mit exakt demselben Druck in der Schulter liegt.');
-                tips.push('Überprüfe deine Riemenspannung (falls liegend/kniend). Ein zu lockerer Riemen kostet hier schnell die entscheidenden Ringe.');
-            } else {
-                tips.push('Das KK ist wind- und munitionsfühlig. Nutze die Probeschüsse intensiv, um deine Nullstellung perfekt auszurichten.');
-                tips.push('Achte penibel auf ein gleichbleibendes Schießen: Jede noch so kleine Veränderung im Kopf- oder Wangendruck verändert die Treffpunktlage.');
-            }
-        }
-
-        // Add a context specific tip based on the duel result
-        if (resultClass === 'lose') {
-            tips.push('Lass dich vom Bot nicht unter Druck setzen. Schieße deinen eigenen Rhythmus und blende den Gegner komplett aus!');
-        } else if (resultClass === 'win') {
-            tips.push('Perfekter Wettkampffokus! Du hast die Nerven gegen den Bot behalten. Genau dieses Mindset brauchst du im echten Finale.');
-        }
-
-        // Format as HTML list
-        return tips.map(t => `<div class="ic-tip">${t}</div>`).join('');
     }
 
     /* ─── PUBLIC API ─────────────────────────── */
