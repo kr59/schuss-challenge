@@ -25,6 +25,7 @@
   <script src="haptics.js"></script>
   <script src="sounds.js"></script>
   <script src="tutorial.js"></script>
+  <script src="image-compare.js"></script>
   <style>
     /* ═══════════════════════════════════════════
    BASE
@@ -3813,6 +3814,10 @@
       </div><!-- /profile-overlay -->
 
       <!-- Weapon Tabs -->
+      <div class="hdr-spacer" aria-hidden="true" style="display:flex; justify-content:center; margin-bottom: 5px;">
+        <button id="muteBtn" onclick="toggleMute()"
+          style="background:none; border:none; color:rgba(255,255,255,0.4); font-size:1.2rem; cursor:pointer; padding:4px;">🔊</button>
+      </div>
       <div class="weapon-tabs" id="weaponTabs">
         <div class="weapon-tab active" id="wTabLG" onclick="switchWeapon('lg')">
           <div class="wt-name">🌬️ Luftgewehr</div>
@@ -3828,7 +3833,7 @@
       <div class="hdr-tag" id="setupTag">◆ LUFTGEWEHR · LG 40 · 10 METER ◆</div>
 
       <!-- Schützenpass -->
-      <div class="schuetzenpass" id="schuetzenpass">
+      <div class="schuetzenpass" id="schuetzenpass" onclick="Sfx.play('click')">
         <div class="sp-hd">
           <div>
             <div class="sp-rank-lbl">◈ Schützenpass</div>
@@ -4109,6 +4114,12 @@
         <div class="divider-line"></div>
       </div>
 
+      <!-- Scan Option -->
+      <button class="btn-fire" onclick="startScanDuel()"
+        style="width:100%; margin-bottom: 12px; background:radial-gradient(circle at center, #8ecf40, #5a8c1e);">
+        📷 ERGEBNIS SCANNEN
+      </button>
+
       <!-- Quick buttons -->
       <div class="quick-pair">
         <button class="btn-win" onclick="quickResult('win')">
@@ -4152,6 +4163,7 @@
     <div class="go-reason" id="goReason"></div>
     <div class="go-margin" id="goMargin" style="display:none;"></div>
     <div id="analysisResult"></div>
+    <div id="icGameOverSlot" style="width:100%;display:flex;justify-content:center;"></div>
     <button class="btn-fire" style="max-width:320px;position:relative;z-index:1;" onclick="restartGame()">🔄
       &nbsp;NOCHMAL</button>
   </div>
@@ -4209,6 +4221,171 @@
 
   <!-- ══════════════════════════ SCRIPT ══════════════════════════ -->
   <script>
+    /* ─── AUDIO ENGINE (Procedural Web Audio) ── */
+    const Sfx = {
+      ctx: null,
+      muted: false,
+      init() {
+        if (!this.ctx) {
+          try {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            this.ctx = new AudioContext();
+          } catch (e) { console.warn('Web Audio API not supported'); }
+        } else if (this.ctx.state === 'suspended') {
+          this.ctx.resume();
+        }
+      },
+      play(type, data = null) {
+        if (this.muted || !this.ctx) return;
+        const t = this.ctx.currentTime;
+        const g = this.ctx.createGain();
+        g.connect(this.ctx.destination);
+
+        const osc = this.ctx.createOscillator();
+        osc.connect(g);
+
+        if (type === 'click') {
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(600, t);
+          osc.frequency.exponentialRampToValueAtTime(300, t + 0.05);
+          g.gain.setValueAtTime(0.7, t);
+          g.gain.exponentialRampToValueAtTime(0.01, t + 0.05);
+          osc.start(t);
+          osc.stop(t + 0.05);
+        }
+        else if (type === 'start') { // Tiefer Swoosh für Duell Start
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(100, t);
+          osc.frequency.exponentialRampToValueAtTime(350, t + 0.4);
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(0.8, t + 0.1);
+          g.gain.exponentialRampToValueAtTime(0.01, t + 0.4);
+          osc.start(t);
+          osc.stop(t + 0.4);
+        }
+        else if (type === 'shootLG') { // Luftdruck Zischen + Knall
+          const noise = this.ctx.createBufferSource();
+          const buffer = this.ctx.createBuffer(1, this.ctx.sampleRate * 0.2, this.ctx.sampleRate);
+          const o = buffer.getChannelData(0);
+          for (let i = 0; i < buffer.length; i++) o[i] = (Math.random() * 2 - 1) * 0.5;
+          noise.buffer = buffer;
+          const noiseFilter = this.ctx.createBiquadFilter();
+          noiseFilter.type = 'highpass';
+          noiseFilter.frequency.value = 1000;
+
+          noise.connect(noiseFilter);
+          noiseFilter.connect(g);
+
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(150, t);
+          osc.frequency.exponentialRampToValueAtTime(40, t + 0.1);
+
+          g.gain.setValueAtTime(0.9, t);
+          g.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+
+          noise.start(t);
+          osc.start(t);
+          osc.stop(t + 0.15);
+        }
+        else if (type === 'shootKK') { // KK Scharfer Knall
+          const noise = this.ctx.createBufferSource();
+          const buffer = this.ctx.createBuffer(1, this.ctx.sampleRate * 0.3, this.ctx.sampleRate);
+          const o = buffer.getChannelData(0);
+          for (let i = 0; i < buffer.length; i++) o[i] = (Math.random() * 2 - 1) * 0.8;
+          noise.buffer = buffer;
+
+          const noiseFilter = this.ctx.createBiquadFilter();
+          noiseFilter.type = 'lowpass';
+          noiseFilter.frequency.setValueAtTime(4000, t);
+          noiseFilter.frequency.exponentialRampToValueAtTime(500, t + 0.2);
+
+          noise.connect(noiseFilter);
+          noiseFilter.connect(g);
+
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(200, t);
+          osc.frequency.exponentialRampToValueAtTime(50, t + 0.15);
+
+          g.gain.setValueAtTime(1, t);
+          g.gain.exponentialRampToValueAtTime(0.01, t + 0.25);
+
+          noise.start(t);
+          osc.start(t);
+          osc.stop(t + 0.25);
+        }
+        else if (type === 'hit') {
+          // data is score (0 to 10.9)
+          const pts = data || 0;
+          osc.type = 'sine';
+
+          if (pts >= 10.0) {
+            osc.frequency.setValueAtTime(1200, t); // Helles Ding
+            osc.frequency.exponentialRampToValueAtTime(800, t + 0.3);
+            g.gain.setValueAtTime(0.6, t);
+            g.gain.exponentialRampToValueAtTime(0.01, t + 0.4);
+          } else if (pts >= 9.0) {
+            osc.frequency.setValueAtTime(800, t);
+            osc.frequency.exponentialRampToValueAtTime(600, t + 0.2);
+            g.gain.setValueAtTime(0.5, t);
+            g.gain.exponentialRampToValueAtTime(0.01, t + 0.3);
+          } else if (pts >= 6.0) {
+            osc.frequency.setValueAtTime(400, t);
+            g.gain.setValueAtTime(0.4, t);
+            g.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+          } else {
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(150, t); // Dumpferes Tocken
+            g.gain.setValueAtTime(0.3, t);
+            g.gain.linearRampToValueAtTime(0.01, t + 0.1);
+          }
+          osc.start(t);
+          osc.stop(t + 0.4);
+        }
+        else if (type === 'win') {
+          const notes = [440, 554, 659, 880]; // A Major Arpeggio
+          g.gain.setValueAtTime(0.5, t);
+          notes.forEach((freq, i) => {
+            const o = this.ctx.createOscillator();
+            o.type = 'sine';
+            o.frequency.value = freq;
+            o.connect(g);
+            o.start(t + i * 0.1);
+            o.stop(t + i * 0.1 + 0.3);
+          });
+          g.gain.linearRampToValueAtTime(0.01, t + 0.6);
+        }
+        else if (type === 'lose') {
+          const notes = [300, 250, 200]; // Descending
+          g.gain.setValueAtTime(0.5, t);
+          notes.forEach((freq, i) => {
+            const o = this.ctx.createOscillator();
+            o.type = 'triangle';
+            o.frequency.value = freq;
+            o.connect(g);
+            o.start(t + i * 0.2);
+            o.stop(t + i * 0.2 + 0.4);
+          });
+          g.gain.linearRampToValueAtTime(0.01, t + 0.8);
+        }
+        else if (type === 'draw') {
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(300, t);
+          osc.frequency.setValueAtTime(400, t + 0.2);
+          g.gain.setValueAtTime(0.3, t);
+          g.gain.linearRampToValueAtTime(0.01, t + 0.4);
+          osc.start(t);
+          osc.stop(t + 0.4);
+        }
+      }
+    };
+
+    function toggleMute() {
+      Sfx.init();
+      Sfx.muted = !Sfx.muted;
+      document.getElementById('muteBtn').textContent = Sfx.muted ? '🔇' : '🔊';
+      if (!Sfx.muted) Sfx.play('click');
+    }
+
     /* ─── DATA MIGRATION v2 ─── */
     // Alte Daten-Keys bereinigen ohne Username zu löschen
     if (!localStorage.getItem('sd_reset_v2')) {
@@ -4307,52 +4484,38 @@
     const SIGMA = { '10': 18, '50': 46, '100': 72 };
     const DIFF = {
       easy: {
-        mult: 1.85, noise: 10.0, lbl: '😊 KREISKLASSE', cls: 'easy',
-        info: '<b>Kreisklasse</b> – Solider Einstieg. ~290–340 Zehntel (LG40). DSB Bronze bis Silber Niveau.'
+        mult: 0.88, noise: 5, lbl: '😊 KREISKLASSE', cls: 'easy',
+        info: '<b>Kreisklasse</b> – Solider Einstieg. ~310–340 Pkt. Schaffbar mit Konzentration!'
       },
       real: {
-        mult: 1.05, noise: 5.0, lbl: '🎯 BEZIRKSLIGA', cls: 'real',
-        info: '<b>Bezirksliga</b> – Starke 9er und 10er. ~350–380 Zehntel (LG40). DSB Gold Niveau!'
+        mult: 0.60, noise: 3.0, lbl: '🎯 BEZIRKSLIGA', cls: 'real',
+        info: '<b>Bezirksliga</b> – Fast nur 9er und 10er. ~345–365 Pkt. Kein Spaziergang!'
       },
       hard: {
-        mult: 0.52, noise: 1.5, lbl: '💀 WM-NIVEAU', cls: 'hard',
-        info: '<b>WM-Niveau</b> – Fast nur 10er. ~395–415 Zehntel (LG40). Bundesliga-Niveau!'
+        mult: 0.33, noise: 0.7, lbl: '💀 WM-NIVEAU', cls: 'hard',
+        info: '<b>WM-Niveau</b> – Trifft sehr präzise. ~395–405 Pkt. Kaum zu schlagen!'
       },
       elite: {
-        mult: 0.30, noise: 0.25, lbl: '💫 WELTREKORD', cls: 'elite',
-        info: '<b>Weltrekord-Bot</b> – Schießt 415–430 Zehntel (LG40). ISSF-Weltrekordniveau. Viel Glück!'
+        mult: 0.16, noise: 0.12, lbl: '💫 WELTREKORD', cls: 'elite',
+        info: '<b>Weltrekord-Bot</b> – Immer ≥410 Zehntel. Extrem präzise. Viel Glück!'
       }
     };
 
     // Disziplinspezifische Schwierigkeits-Infos
     const DIFF_INFO_BY_DISC = {
-      // LG 60: 1.5× von LG40. ISSF WR Quali = 637.9 Zehntel
+      // LG 60 hat höhere Punktwerte (1,5x von 40 zu 60 Schuss)
       lg60: {
-        easy: '<b>Kreisklasse</b> – Solider Einstieg. ~435–510 Zehntel. Schaffbar mit Konzentration!',
-        real: '<b>Bezirksliga</b> – Starke 9er und 10er. ~525–570 Zehntel. Kein Spaziergang!',
-        hard: '<b>WM-Niveau</b> – Fast nur 10er. ~593–625 Zehntel. Olympia-Quali-Niveau!',
-        elite: '<b>Weltrekord-Bot</b> – Schießt 625–638 Zehntel. ISSF WR = 637.9!'
+        easy: '<b>Kreisklasse</b> – Solider Einstieg. ~465–510 Pkt. Schaffbar mit Konzentration!',
+        real: '<b>Bezirksliga</b> – Fast nur 9er und 10er. ~533–563 Pkt. Kein Spaziergang!',
+        hard: '<b>WM-Niveau</b> – Trifft sehr präzise. ~608–615 Pkt. Kaum zu schlagen!',
+        elite: '<b>Weltrekord-Bot</b> – Immer ≥615 Zehntel. Extrem präzise. Viel Glück!'
       },
-      // KK 50m: 60 Schuss, ganze Ringe. WR Liegend = 600/600
-      kk50: {
-        easy: '<b>Kreisklasse</b> – Solider Einstieg. ~465–510 Ringe. Schaffbar mit Konzentration!',
-        real: '<b>Bezirksliga</b> – Starke 9er und 10er. ~530–565 Ringe. Kein Spaziergang!',
-        hard: '<b>WM-Niveau</b> – Fast nur 10er. ~580–595 Ringe. Kaum zu schlagen!',
-        elite: '<b>Weltrekord-Bot</b> – Schießt 595–600 Ringe. WR = 600/600 perfekt!'
-      },
-      // KK 100m: 60 Schuss, ganze Ringe. Größere Streuung durch SIGMA=72
-      kk100: {
-        easy: '<b>Kreisklasse</b> – Solider Einstieg. ~430–480 Ringe. 100m sind brutal!',
-        real: '<b>Bezirksliga</b> – Starke 9er und 10er. ~500–540 Ringe. Auf 100m richtig stark!',
-        hard: '<b>WM-Niveau</b> – Fast nur 10er. ~560–580 Ringe. Extreme Präzision auf 100m!',
-        elite: '<b>Weltrekord-Bot</b> – Schießt 580–595 Ringe. Auf 100m nahezu unmöglich!'
-      },
-      // 3×20 KK: Olympia 2024 Quali Gold = 594. WR = 1188/1200
+      // 3×20 KK: Pro Position ~200 Punkte max, Gesamt ~600
       kk3x20: {
-        easy: '<b>Kreisklasse</b> – Solider Einstieg. Pro Position ~155–170 Ringe. Gesamt ~465–510.',
-        real: '<b>Bezirksliga</b> – Starke 9er und 10er. Pro Position ~177–190 Ringe. Gesamt ~530–570.',
-        hard: '<b>WM-Niveau</b> – Fast nur 10er. Pro Position ~193–200 Ringe. Gesamt ~580–594.',
-        elite: '<b>Weltrekord-Bot</b> – Pro Position 197–200 Ringe. Gesamt ~594–600. Olympia-Gold = 594!'
+        easy: '<b>Kreisklasse</b> – Solider Einstieg. Pro Position ~155–170 Pkt. Schaffbar mit Konzentration!',
+        real: '<b>Bezirksliga</b> – Fast nur 9er und 10er. Pro Position ~177–188 Pkt. Kein Spaziergang!',
+        hard: '<b>WM-Niveau</b> – Trifft sehr präzise. Pro Position ~202–205 Pkt. Kaum zu schlagen!',
+        elite: '<b>Weltrekord-Bot</b> – Immer ≥205 Zehntel pro Position. Extrem präzise. Viel Glück!'
       }
     };
 
@@ -6033,9 +6196,9 @@
 
     // Positions-Multiplikatoren für KK 3x20 (relativ zu Liegend = 1.0)
     const POS_MULT = {
-      'Liegend': { mult: 0.70, noise: 0.05 }, // extrem präzise, fast nur 10er (WR = 600/600)
+      'Liegend': { mult: 0.70, noise: 0.05 }, // extrem präzise, fast nur 10er
       'Kniend': { mult: 1.10, noise: 0.20 }, // stark, konstant 9-10
-      'Stehend': { mult: 1.50, noise: 0.40 }, // realistisch streut, 8-10 (reduziert von 1.80)
+      'Stehend': { mult: 1.80, noise: 0.50 }, // realistisch streut, 8-10
     };
 
     function fireSingleShot() {
@@ -6735,6 +6898,15 @@
       updateSchuetzenpass();
 
       if (DOM.analysisResult) DOM.analysisResult.innerHTML = '';
+
+      // KI Foto-Vergleich Button einfügen
+      const icSlot = document.getElementById('icGameOverSlot');
+      if (icSlot) {
+        icSlot.innerHTML = '';
+        if (typeof ImageCompare !== 'undefined') {
+          ImageCompare.createGameOverButton(icSlot, isKK ? G.botTotalInt : G.botTotal, isKK);
+        }
+      }
 
       showScreen('screenOver');
     }
