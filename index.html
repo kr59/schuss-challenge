@@ -4114,11 +4114,8 @@
         <div class="divider-line"></div>
       </div>
 
-      <!-- Scan Option -->
-      <button class="btn-fire" onclick="startScanDuel()"
-        style="width:100%; margin-bottom: 12px; background:radial-gradient(circle at center, #8ecf40, #5a8c1e);">
-        📷 ERGEBNIS SCANNEN
-      </button>
+      <!-- Image Compare UI Slot -->
+      <div id="icGameOverSlot" style="width:100%;display:flex;justify-content:center;margin-bottom:12px;"></div>
 
       <!-- Quick buttons -->
       <div class="quick-pair">
@@ -4163,7 +4160,6 @@
     <div class="go-reason" id="goReason"></div>
     <div class="go-margin" id="goMargin" style="display:none;"></div>
     <div id="analysisResult"></div>
-    <div id="icGameOverSlot" style="width:100%;display:flex;justify-content:center;"></div>
     <button class="btn-fire" style="max-width:320px;position:relative;z-index:1;" onclick="restartGame()">🔄
       &nbsp;NOCHMAL</button>
   </div>
@@ -6456,6 +6452,15 @@
       const ecLbl = DOM.playerInp.closest('.ec-row')?.previousElementSibling;
       if (ecLbl) ecLbl.textContent = isKK ? '◈ Dein Ergebnis eingeben (Ganze Ringe)' : '◈ Dein Ergebnis eingeben (Zehntel & Ganze)';
 
+      // KI Foto-Vergleich Button einfügen
+      const icSlot = document.getElementById('icGameOverSlot');
+      if (icSlot) {
+        icSlot.innerHTML = '';
+        if (typeof ImageCompare !== 'undefined') {
+          ImageCompare.createGameOverButton(icSlot, isKK ? G.botTotalInt : G.botTotal, isKK);
+        }
+      }
+
       showScreen('screenEntry');
     }
 
@@ -6898,15 +6903,6 @@
       updateSchuetzenpass();
 
       if (DOM.analysisResult) DOM.analysisResult.innerHTML = '';
-
-      // KI Foto-Vergleich Button einfügen
-      const icSlot = document.getElementById('icGameOverSlot');
-      if (icSlot) {
-        icSlot.innerHTML = '';
-        if (typeof ImageCompare !== 'undefined') {
-          ImageCompare.createGameOverButton(icSlot, isKK ? G.botTotalInt : G.botTotal, isKK);
-        }
-      }
 
       showScreen('screenOver');
     }
