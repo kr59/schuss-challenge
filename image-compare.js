@@ -1177,11 +1177,7 @@ const ImageCompare = (() => {
             btn.className = 'ic-go-upload-btn';
             btn.innerHTML = '<span class="ic-go-upload-ico">📷</span> Wettkampf-Foto vergleichen';
             btn.addEventListener('click', () => {
-                // Re-read botScore from global state in case it updated
-                const currentBotScore = typeof G !== 'undefined'
-                    ? (isKK ? G.botTotalInt : G.botTotal)
-                    : botScore;
-                ImageCompare.open(currentBotScore, isKK);
+                ImageCompare.open(botScore, isKK);
             });
 
             container.appendChild(btn);
