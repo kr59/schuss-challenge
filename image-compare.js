@@ -3,7 +3,7 @@
    100% kostenlos · Tesseract.js (Open-Source OCR) · Läuft im Browser
    ═══════════════════════════════════════════════════════════════════════ */
 
-const ImageCompare = (() => {
+window.ImageCompare = (function () {
     'use strict';
 
     /* ─── PRIVATE STATE ──────────────────────── */
