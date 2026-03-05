@@ -4307,52 +4307,52 @@
     const SIGMA = { '10': 18, '50': 46, '100': 72 };
     const DIFF = {
       easy: {
-        mult: 1.40, noise: 8.0, lbl: '😊 KREISKLASSE', cls: 'easy',
-        info: '<b>Kreisklasse</b> – Solider Einstieg. ~310–340 Zehntel (LG40). Ø 7.8–8.5 pro Schuss.'
+        mult: 1.85, noise: 10.0, lbl: '😊 KREISKLASSE', cls: 'easy',
+        info: '<b>Kreisklasse</b> – Solider Einstieg. ~290–340 Zehntel (LG40). DSB Bronze bis Silber Niveau.'
       },
       real: {
-        mult: 0.82, noise: 4.0, lbl: '🎯 BEZIRKSLIGA', cls: 'real',
-        info: '<b>Bezirksliga</b> – Starke 9er und 10er. ~355–380 Zehntel (LG40). Ø 8.9–9.5 pro Schuss.'
+        mult: 1.05, noise: 5.0, lbl: '🎯 BEZIRKSLIGA', cls: 'real',
+        info: '<b>Bezirksliga</b> – Starke 9er und 10er. ~350–380 Zehntel (LG40). DSB Gold Niveau!'
       },
       hard: {
-        mult: 0.40, noise: 1.0, lbl: '💀 WM-NIVEAU', cls: 'hard',
-        info: '<b>WM-Niveau</b> – Fast nur 10er. ~395–410 Zehntel (LG40). Ø 9.9–10.3 pro Schuss.'
+        mult: 0.52, noise: 1.5, lbl: '💀 WM-NIVEAU', cls: 'hard',
+        info: '<b>WM-Niveau</b> – Fast nur 10er. ~395–415 Zehntel (LG40). Bundesliga-Niveau!'
       },
       elite: {
-        mult: 0.22, noise: 0.15, lbl: '💫 WELTREKORD', cls: 'elite',
-        info: '<b>Weltrekord-Bot</b> – Schießt 410–418 Zehntel (LG40). Ø 10.3–10.5. Viel Glück!'
+        mult: 0.30, noise: 0.25, lbl: '💫 WELTREKORD', cls: 'elite',
+        info: '<b>Weltrekord-Bot</b> – Schießt 415–430 Zehntel (LG40). ISSF-Weltrekordniveau. Viel Glück!'
       }
     };
 
     // Disziplinspezifische Schwierigkeits-Infos
     const DIFF_INFO_BY_DISC = {
-      // LG 60 hat höhere Punktwerte (1,5x von 40 zu 60 Schuss)
+      // LG 60: 1.5× von LG40. ISSF WR Quali = 637.9 Zehntel
       lg60: {
-        easy: '<b>Kreisklasse</b> – Solider Einstieg. ~465–510 Zehntel. Ø 7.8–8.5 pro Schuss.',
-        real: '<b>Bezirksliga</b> – Starke 9er und 10er. ~533–570 Zehntel. Ø 8.9–9.5 pro Schuss.',
-        hard: '<b>WM-Niveau</b> – Fast nur 10er. ~593–615 Zehntel. Ø 9.9–10.3 pro Schuss.',
-        elite: '<b>Weltrekord-Bot</b> – Schießt 615–628 Zehntel. Ø 10.3–10.5. Viel Glück!'
+        easy: '<b>Kreisklasse</b> – Solider Einstieg. ~435–510 Zehntel. Schaffbar mit Konzentration!',
+        real: '<b>Bezirksliga</b> – Starke 9er und 10er. ~525–570 Zehntel. Kein Spaziergang!',
+        hard: '<b>WM-Niveau</b> – Fast nur 10er. ~593–625 Zehntel. Olympia-Quali-Niveau!',
+        elite: '<b>Weltrekord-Bot</b> – Schießt 625–638 Zehntel. ISSF WR = 637.9!'
       },
-      // KK 50m: 60 Schuss, ganze Ringe (kein Zehntel)
+      // KK 50m: 60 Schuss, ganze Ringe. WR Liegend = 600/600
       kk50: {
-        easy: '<b>Kreisklasse</b> – Solider Einstieg. ~465–510 Ringe. Ø 7.8–8.5 pro Schuss.',
-        real: '<b>Bezirksliga</b> – Starke 9er und 10er. ~533–570 Ringe. Ø 8.9–9.5 pro Schuss.',
+        easy: '<b>Kreisklasse</b> – Solider Einstieg. ~465–510 Ringe. Schaffbar mit Konzentration!',
+        real: '<b>Bezirksliga</b> – Starke 9er und 10er. ~530–565 Ringe. Kein Spaziergang!',
         hard: '<b>WM-Niveau</b> – Fast nur 10er. ~580–595 Ringe. Kaum zu schlagen!',
-        elite: '<b>Weltrekord-Bot</b> – Schießt 595–600 Ringe. Absolute Perfektion!'
+        elite: '<b>Weltrekord-Bot</b> – Schießt 595–600 Ringe. WR = 600/600 perfekt!'
       },
-      // KK 100m: 60 Schuss, ganze Ringe
+      // KK 100m: 60 Schuss, ganze Ringe. Größere Streuung durch SIGMA=72
       kk100: {
         easy: '<b>Kreisklasse</b> – Solider Einstieg. ~430–480 Ringe. 100m sind brutal!',
         real: '<b>Bezirksliga</b> – Starke 9er und 10er. ~500–540 Ringe. Auf 100m richtig stark!',
         hard: '<b>WM-Niveau</b> – Fast nur 10er. ~560–580 Ringe. Extreme Präzision auf 100m!',
         elite: '<b>Weltrekord-Bot</b> – Schießt 580–595 Ringe. Auf 100m nahezu unmöglich!'
       },
-      // 3×20 KK: Pro Position ~200 Punkte max, Gesamt ~600
+      // 3×20 KK: Olympia 2024 Quali Gold = 594. WR = 1188/1200
       kk3x20: {
         easy: '<b>Kreisklasse</b> – Solider Einstieg. Pro Position ~155–170 Ringe. Gesamt ~465–510.',
-        real: '<b>Bezirksliga</b> – Starke 9er und 10er. Pro Position ~178–190 Ringe. Gesamt ~533–570.',
-        hard: '<b>WM-Niveau</b> – Fast nur 10er. Pro Position ~193–200 Ringe. Gesamt ~580–600.',
-        elite: '<b>Weltrekord-Bot</b> – Pro Position 198–200 Ringe. Gesamt ~595–600. Absolute Perfektion!'
+        real: '<b>Bezirksliga</b> – Starke 9er und 10er. Pro Position ~177–190 Ringe. Gesamt ~530–570.',
+        hard: '<b>WM-Niveau</b> – Fast nur 10er. Pro Position ~193–200 Ringe. Gesamt ~580–594.',
+        elite: '<b>Weltrekord-Bot</b> – Pro Position 197–200 Ringe. Gesamt ~594–600. Olympia-Gold = 594!'
       }
     };
 
@@ -6033,9 +6033,9 @@
 
     // Positions-Multiplikatoren für KK 3x20 (relativ zu Liegend = 1.0)
     const POS_MULT = {
-      'Liegend': { mult: 0.70, noise: 0.05 }, // extrem präzise, fast nur 10er
+      'Liegend': { mult: 0.70, noise: 0.05 }, // extrem präzise, fast nur 10er (WR = 600/600)
       'Kniend': { mult: 1.10, noise: 0.20 }, // stark, konstant 9-10
-      'Stehend': { mult: 1.80, noise: 0.50 }, // realistisch streut, 8-10
+      'Stehend': { mult: 1.50, noise: 0.40 }, // realistisch streut, 8-10 (reduziert von 1.80)
     };
 
     function fireSingleShot() {
