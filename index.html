@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="de">
 
 <head>
@@ -40,21 +40,22 @@
       -webkit-tap-highlight-color: transparent
     }
 
-    html,
-    body {
+    html {
       height: 100%;
-      overflow: hidden
+      min-height: 100vh;
+      overflow: auto;
     }
 
     body {
       height: 100%;
+      min-height: 100vh;
       background: #0e1208;
       font-family: 'Outfit', sans-serif;
       font-size: 16px;
       display: flex;
       flex-direction: column;
       align-items: center;
-      overflow: hidden;
+      overflow: auto;
       color: #e8e8e0;
     }
 
@@ -87,11 +88,15 @@
       flex-direction: column;
       align-items: center;
       width: 100%;
-      height: 100%;
+      height: 100vh;
+      max-height: 100vh;
       position: relative;
       z-index: 1;
       overflow-y: auto;
       overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
+      padding-bottom: env(safe-area-inset-bottom, 0);
     }
 
     .screen.active {
@@ -1255,6 +1260,12 @@
       gap: 13px;
     }
 
+    /* Setup-Screen: Content nimmt natürliche Höhe, damit untere Hälfte
+       (5er-Salve, DUELL STARTEN) sichtbar bleibt und die Seite scrollt */
+    #screenSetup .content {
+      flex: 0 0 auto;
+    }
+
     .card {
       width: 100%;
       background: rgba(0, 0, 0, .5);
@@ -1623,10 +1634,12 @@
       width: 100%;
       max-width: 420px;
       padding: 0 18px 18px;
+      padding-bottom: calc(18px + env(safe-area-inset-bottom, 0));
       display: flex;
       flex-direction: column;
       gap: 9px;
       flex-shrink: 0;
+      contain: layout;
     }
 
     .btn-fire {
@@ -1663,8 +1676,8 @@
     }
 
     .btn-fire:active {
-      transform: translateY(4px);
-      box-shadow: 0 1px 0 #5a3c08, 0 3px 8px rgba(180, 140, 0, .15), inset 0 1px 0 rgba(255, 255, 255, .3);
+      opacity: 0.85;
+      box-shadow: 0 2px 0 #5a3c08, 0 4px 12px rgba(180, 140, 0, .2), inset 0 1px 0 rgba(255, 255, 255, .3);
     }
 
     .btn-fire:disabled {
@@ -2370,9 +2383,40 @@
     }
 
     .btn-calc:active {
-      transform: translateY(2px);
-      box-shadow: 0 1px 0 #1a3008;
+      opacity: 0.85;
+      box-shadow: 0 2px 0 #1a3008;
     }
+
+    /* Foto-Button (Wettkampf-Foto vergleichen) — immer sichtbar auf Ergebnis-Screen */
+    .ic-go-upload-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      max-width: 320px;
+      margin: 8px auto 4px;
+      padding: 11px 18px;
+      background: rgba(120, 180, 40, .1);
+      border: 1px solid rgba(120, 180, 40, .25);
+      border-radius: 12px;
+      color: rgba(180, 230, 80, .8);
+      font-family: 'Outfit', sans-serif;
+      font-size: .78rem;
+      font-weight: 600;
+      letter-spacing: .06em;
+      cursor: pointer;
+      transition: all .2s ease;
+    }
+    .ic-go-upload-btn:hover {
+      background: rgba(120, 180, 40, .16);
+      border-color: rgba(120, 180, 40, .4);
+      color: #a0e060;
+    }
+    .ic-go-upload-btn:active {
+      background: rgba(120, 180, 40, .22);
+    }
+    .ic-go-upload-ico { font-size: 1.1rem; }
 
     /* Auto-calc Ganze hint */
     .auto-int {
@@ -2441,8 +2485,8 @@
     }
 
     .btn-win:active {
-      transform: translateY(3px);
-      box-shadow: 0 1px 0 #245008;
+      opacity: 0.9;
+      box-shadow: 0 2px 0 #245008;
     }
 
     .btn-lose {
@@ -2466,8 +2510,8 @@
     }
 
     .btn-lose:active {
-      transform: translateY(3px);
-      box-shadow: 0 1px 0 #240808;
+      opacity: 0.9;
+      box-shadow: 0 2px 0 #240808;
     }
 
     .qb-ico {
@@ -2903,11 +2947,15 @@
     #muzzleFlash {
       position: fixed;
       inset: 0;
-      background: radial-gradient(ellipse at center, rgba(255, 240, 120, .95) 0%, rgba(255, 120, 0, .35) 42%, transparent 65%);
+      left: 0; right: 0; top: 0; bottom: 0;
+      /* Gradient bis ganz unten deckend, Rand gleicht Body-Hintergrund (#0e1208) — kein hellgrüner Streifen */
+      background: radial-gradient(ellipse 150% 150% at 50% 40%, rgba(255, 240, 120, .9) 0%, rgba(255, 120, 0, .25) 40%, rgba(14, 18, 8, .6) 75%, #0e1208 100%);
       z-index: 999;
       pointer-events: none;
       opacity: 0;
       will-change: opacity;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
     }
 
     @keyframes camShake {
@@ -4115,8 +4163,13 @@
         <div class="divider-line"></div>
       </div>
 
-      <!-- Image Compare UI Slot -->
-      <div id="icGameOverSlot" style="width:100%;display:flex;justify-content:center;margin-bottom:12px;"></div>
+      <!-- Image Compare UI Slot (Foto-Button: immer sichtbar, ruft ImageCompare.open auf) -->
+      <div id="icGameOverSlot" style="width:100%;display:flex;justify-content:center;margin-bottom:12px;">
+        <button class="ic-go-upload-btn" onclick="ImageCompare.open()">
+          <span class="ic-go-upload-ico">📷</span>
+          <span>Wettkampf-Foto vergleichen</span>
+        </button>
+      </div>
 
       <!-- Quick buttons -->
       <div class="quick-pair">
@@ -6289,10 +6342,12 @@
         if (res) results.push(res); // Nur gültige Shots sammeln
       }
 
-      // FX
+      // FX — kein overflow-Toggle (verursachte hellgrünen Flackerstreifen unten)
       const f = DOM.muzzleFlash;
       f.style.transition = 'none'; f.style.opacity = '1';
-      setTimeout(() => { f.style.transition = 'opacity .22s'; f.style.opacity = '0'; }, 55);
+      setTimeout(() => {
+        f.style.transition = 'opacity .22s'; f.style.opacity = '0';
+      }, 55);
       document.body.classList.remove('shaking');
       void document.body.offsetWidth;
       document.body.classList.add('shaking');
@@ -6453,15 +6508,22 @@
       const ecLbl = DOM.playerInp.closest('.ec-row')?.previousElementSibling;
       if (ecLbl) ecLbl.textContent = isKK ? '◈ Dein Ergebnis eingeben (Ganze Ringe)' : '◈ Dein Ergebnis eingeben (Zehntel & Ganze)';
 
-      // KI Foto-Vergleich Button einfügen
+      // Foto-Button einfügen (immer sichtbar, auch wenn ImageCompare fehlt)
       const icSlot = document.getElementById('icGameOverSlot');
       if (icSlot) {
         icSlot.innerHTML = '';
-        if (typeof ImageCompare !== 'undefined') {
-          ImageCompare.createGameOverButton(icSlot, isKK ? G.botTotalInt : G.botTotal, isKK, G.discipline);
-        }
+        const btn = document.createElement('button');
+        btn.className = 'ic-go-upload-btn';
+        btn.innerHTML = '<span class="ic-go-upload-ico">📸</span> Wettkampf-Foto vergleichen';
+        btn.onclick = () => {
+          if (typeof ImageCompare !== 'undefined') {
+            ImageCompare.open(isKK ? G.botTotalInt : G.botTotal, isKK, G.discipline);
+          } else {
+            alert('Foto-Vergleich wird geladen. Bitte Seite neu laden.');
+          }
+        };
+        icSlot.appendChild(btn);
       }
-
       showScreen('screenEntry');
     }
 

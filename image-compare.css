@@ -5,10 +5,18 @@
   z-index: 950;
   background: rgba(0,0,0,.7);
   backdrop-filter: blur(6px);
-  display: flex;
+  display: none;
   align-items: flex-end;
   justify-content: center;
   animation: ic-fadeIn .2s ease;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.ic-overlay.active {
+  display: flex;
+  pointer-events: auto;
+  opacity: 1;
 }
 @keyframes ic-fadeIn {
   from { opacity: 0; }

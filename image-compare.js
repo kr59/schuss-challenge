@@ -23,9 +23,9 @@ window.ImageCompare = (function () {
   if (!Brain) {
     console.error('[ImageCompare] FEHLER: image-compare-brain.js muss VOR image-compare.js geladen werden!');
   }
-  const SCORE_CONFIG = Brain.SCORE_CONFIG;
-  const OCR_PASSES = Brain.OCR_PASSES;
-  const cleanOCRText = Brain.cleanOCRText;
+  const SCORE_CONFIG = Brain ? Brain.SCORE_CONFIG : {};
+  const OCR_PASSES = Brain ? Brain.OCR_PASSES : [];
+  const cleanOCRText = Brain ? Brain.cleanOCRText : (t) => (t || '');
 
   /* ─── PRIVATE STATE ──────────────────────── */
   let _isProcessing = false;
@@ -732,96 +732,41 @@ window.ImageCompare = (function () {
       }
     }
 
+
+
     return { bestMatch: unique[0], alternatives: unique.slice(1, 4), allScores: unique };
   }
 
   /* ═══ 5. UI-RENDERING ══════════════════════════════════════════════ */
 
-  // Build the upload overlay
+  // Reveal the statically defined upload overlay
   function createOverlay(botScore, isKK) {
-    // Remove existing overlay
-    const existing = document.getElementById('icOverlay');
-    if (existing) existing.remove();
+    const overlay = document.getElementById('icOverlay');
+    if (!overlay) {
+      console.error('[ImageCompare] Fehler: #icOverlay nicht in index.html gefunden!');
+      return null;
+    }
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ic-overlay';
-    overlay.id = 'icOverlay';
+    // Reset UI to default state
+    resetUploadZone(overlay, isKK);
 
-    overlay.innerHTML = `
-    < div class="ic-sheet" >
-        <div class="ic-handle"></div>
-        <div class="ic-header">
-          <div class="ic-title">📷 FOTO-ANALYSE</div>
-          <div class="ic-close" id="icClose">✕</div>
-        </div>
-        <div class="ic-body">
-          <!-- Upload Zone -->
-          <div class="ic-upload-zone" id="icUploadZone">
-            <input type="file" class="ic-upload-input" id="icFileInput"
-                   accept="image/*" capture="environment">
-            <span class="ic-upload-icon">📸</span>
-            <div class="ic-upload-text">Foto der Ergebnisanzeige<br>hochladen oder aufnehmen</div>
-            <div class="ic-upload-sub">JPG, PNG · Kamera oder Galerie</div>
-          </div>
+    // Show overlay
+    overlay.style.opacity = '1';
+    overlay.style.pointerEvents = 'auto';
 
-          <!-- Progress -->
-          <div class="ic-progress" id="icProgress">
-            <div class="ic-progress-label">🤖 KI-Analyse</div>
-            <div class="ic-progress-bar">
-              <div class="ic-progress-fill" id="icProgressFill"></div>
-            </div>
-            <div class="ic-progress-status" id="icProgressStatus">Wird vorbereitet…</div>
-          </div>
+    // Store data attributes
+    overlay.dataset.botScore = botScore || 0;
 
-          <!-- Result -->
-          <div class="ic-result-card" id="icResultCard">
-            <div class="ic-result-header">◈ Erkanntes Ergebnis</div>
-            <div class="ic-detected-score">
-              <span class="ic-detected-icon">🎯</span>
-              <div class="ic-detected-info">
-                <div class="ic-detected-value" id="icDetectedValue">–</div>
-                <div class="ic-detected-label" id="icDetectedLabel">Wird analysiert…</div>
-              </div>
-            </div>
-            </div>
+    // Ensure events are attached (using a flag to prevent multiple attachments if called multiple times)
+    if (!overlay.dataset.eventsAttached) {
+      setupOverlayEvents(overlay, isKK);
+      overlay.dataset.eventsAttached = 'true';
+    }
 
-            <!-- NEW: Toggle for manual correction -->
-            <button id="icBtnWrong" style="width:100%; margin-top: 12px; background: rgba(240,80,60,0.15); color: #f0503c; border: 1px solid rgba(240,80,60,0.3); padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer;">
-              ❌ Falsch erkannt? Hier korrigieren
-            </button>
-
-            <div class="ic-edit-score" id="icEditScoreBlock" style="display:none; margin-top: 12px;">
-              <div class="ic-edit-hint" style="color:#f0503c; margin-bottom: 8px;">✏️ Bitte richtiges Ergebnis eintragen:</div>
-              <input type="number" class="ic-score-input" id="icScoreInput"
-                     placeholder="${isKK ? 'z.B. 392' : 'z.B. 405.2'}"
-                     step="${isKK ? '1' : '0.1'}" min="0" max="660"
-                     inputmode="${isKK ? 'numeric' : 'decimal'}">
-            </div>
-
-            <!-- Raw OCR text toggle -->
-            <div class="ic-raw-toggle" id="icRawToggle">▶ OCR-Rohtext anzeigen</div>
-            <div class="ic-raw-text" id="icRawText"></div>
-          </div>
-
-          <!-- Compare Button -->
-          <button class="ic-compare-btn" id="icCompareBtn" disabled>
-            ✅ ERGEBNIS ÜBERNEHMEN
-          </button>
-
-          <div class="ic-info">
-            🔒 Dein Foto wird <b>nur lokal</b> im Browser analysiert.<br>
-            Es wird nichts hochgeladen. 100% offline & kostenlos.
-          </div>
-        </div>
-      </div >
-    `;
-
-    document.body.appendChild(overlay);
-    setupOverlayEvents(overlay, botScore, isKK);
     return overlay;
   }
 
-  function setupOverlayEvents(overlay, botScore, isKK) {
+  function setupOverlayEvents(overlay, isKK) {
     const closeBtn = overlay.querySelector('#icClose');
     const fileInput = overlay.querySelector('#icFileInput');
     const uploadZone = overlay.querySelector('#icUploadZone');
@@ -850,7 +795,9 @@ window.ImageCompare = (function () {
     // File input
     fileInput.addEventListener('change', (e) => {
       const file = e.target.files[0];
-      if (file) handleImageFile(file, overlay, botScore, isKK);
+      const botScore = parseFloat(overlay.dataset.botScore) || 0;
+      const discipline = overlay.dataset.discipline || null; // Retrieve discipline from overlay
+      if (file) handleImageFile(file, overlay, botScore, isKK, discipline);
     });
 
     // Drag & drop
@@ -865,14 +812,17 @@ window.ImageCompare = (function () {
       e.preventDefault();
       uploadZone.classList.remove('dragover');
       const file = e.dataTransfer?.files[0];
+      const botScore = parseFloat(overlay.dataset.botScore) || 0;
+      const discipline = overlay.dataset.discipline || null; // Retrieve discipline from overlay
       if (file && file.type.startsWith('image/')) {
-        handleImageFile(file, overlay, botScore, isKK);
+        handleImageFile(file, overlay, botScore, isKK, discipline);
       }
     });
 
     // Compare button (now the final submit)
     compareBtn.addEventListener('click', () => {
       const playerScore = parseFloat(scoreInput.value);
+      const botScore = parseFloat(overlay.dataset.botScore) || 0;
       if (isNaN(playerScore) || playerScore < 0) {
         scoreInput.style.borderColor = 'rgba(240,80,60,.6)';
         setTimeout(() => { scoreInput.style.borderColor = ''; }, 1200);
@@ -947,19 +897,21 @@ window.ImageCompare = (function () {
     const overlay = document.getElementById('icOverlay');
     if (overlay) {
       overlay.style.opacity = '0';
+      overlay.style.pointerEvents = 'none';
       overlay.style.transition = 'opacity .2s';
-      setTimeout(() => overlay.remove(), 200);
+      // Reset inputs after closing to prevent stale data briefly flashing on next open
+      // This is now handled by resetUploadZone when createOverlay is called.
     }
     _isProcessing = false;
   }
 
   /* ─── IMAGE PROCESSING FLOW ─────────────── */
-  async function handleImageFile(file, overlay, botScore, isKK) {
+  async function handleImageFile(file, overlay, botScore, isKK, discipline = null) {
     if (_isProcessing) return;
     _isProcessing = true;
 
     // Grab discipline attached to overlay by open()
-    const discipline = overlay.dataset.discipline || null;
+    // const discipline = overlay.dataset.discipline || null; // discipline is now passed as an argument
 
     // Improvement #6: OCR-Ergebnis-Cache
     const cacheKey = getCacheKey(file);
@@ -979,13 +931,217 @@ window.ImageCompare = (function () {
     const objectUrl = URL.createObjectURL(file);
 
     uploadZone.classList.add('has-image');
-    uploadZone.innerHTML = `
-    < div class="ic-preview-wrap" >
-      <img class="ic-preview-img" src="${objectUrl}" alt="Upload" id="icPreviewImg">
-        <div class="ic-remove-img" id="icRemoveImg" title="Bild entfernen">✕</div>
-      </div>
-  `;
-    const removeBtn = overlay.querySelector('#icRemoveImg');
+  /* ═══ 5. UI-RENDERING ══════════════════════════════════════════════ */
+
+  // Reveal the statically defined upload overlay
+  function createOverlay(botScore, isKK) {
+    const overlay = document.getElementById('icOverlay');
+    if (!overlay) {
+      console.error('[ImageCompare] Fehler: #icOverlay nicht in index.html gefunden!');
+      return null;
+    }
+
+    // Reset UI to default state
+    resetUploadZone(overlay, isKK);
+    
+    // Show overlay
+    overlay.style.opacity = '1';
+    overlay.style.pointerEvents = 'auto';
+
+    // Store data attributes
+    overlay.dataset.botScore = botScore || 0;
+    overlay.dataset.isKK = isKK; // Store isKK for closeOverlay and other functions
+    
+    // Ensure events are attached (using a flag to prevent multiple attachments if called multiple times)
+    if (!overlay.dataset.eventsAttached) {
+      setupOverlayEvents(overlay, isKK);
+      overlay.dataset.eventsAttached = 'true';
+    }
+
+    return overlay;
+  }
+
+  function setupOverlayEvents(overlay, isKK) {
+    const closeBtn = overlay.querySelector('#icClose');
+    const fileInput = overlay.querySelector('#icFileInput');
+    const uploadZone = overlay.querySelector('#icUploadZone');
+    const compareBtn = overlay.querySelector('#icCompareBtn');
+    const rawToggle = overlay.querySelector('#icRawToggle');
+    const rawText = overlay.querySelector('#icRawText');
+    const scoreInput = overlay.querySelector('#icScoreInput');
+    const btnWrong = overlay.querySelector('#icBtnWrong');
+    const editScoreBlock = overlay.querySelector('#icEditScoreBlock');
+
+    // Close
+    closeBtn.addEventListener('click', () => closeOverlay());
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeOverlay();
+    });
+
+    // Toggle wrong button
+    if (btnWrong) {
+      btnWrong.addEventListener('click', () => {
+        btnWrong.style.display = 'none';
+        editScoreBlock.style.display = 'block';
+        scoreInput.focus();
+      });
+    }
+
+    // File input (using event delegation on uploadZone to handle dynamic content)
+    uploadZone.addEventListener('change', (e) => {
+      if (e.target.id === 'icFileInput') {
+        const file = e.target.files[0];
+        const botScore = parseFloat(overlay.dataset.botScore) || 0;
+        const discipline = overlay.dataset.discipline || null;
+        if (file) handleImageFile(file, overlay, botScore, isKK, discipline);
+      }
+    });
+
+    // Drag & drop
+    uploadZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      uploadZone.classList.add('dragover');
+    });
+    uploadZone.addEventListener('dragleave', () => {
+      uploadZone.classList.remove('dragover');
+    });
+    uploadZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      uploadZone.classList.remove('dragover');
+      const file = e.dataTransfer?.files[0];
+      const botScore = parseFloat(overlay.dataset.botScore) || 0;
+      const discipline = overlay.dataset.discipline || null;
+      if (file && file.type.startsWith('image/')) {
+        handleImageFile(file, overlay, botScore, isKK, discipline);
+      }
+    });
+
+    // Compare button (now the final submit)
+    compareBtn.addEventListener('click', () => {
+      const playerScore = parseFloat(scoreInput.value);
+      const botScore = parseFloat(overlay.dataset.botScore) || 0;
+      if (isNaN(playerScore) || playerScore < 0) {
+        scoreInput.style.borderColor = 'rgba(240,80,60,.6)';
+        setTimeout(() => { scoreInput.style.borderColor = ''; }, 1200);
+        return;
+      }
+
+      // Feedback-Upload prüfen
+      const originalDetected = overlay.dataset.detectedScore ? parseFloat(overlay.dataset.detectedScore) : -1;
+      if (Brain.FEEDBACK_ENABLED && overlay._currentFile && originalDetected >= 0 && originalDetected !== playerScore) {
+        sendToFormspree(overlay._currentFile, playerScore, originalDetected);
+      }
+
+      closeOverlay();
+
+      // Trigger the real main game over
+      const playerInp = document.getElementById('playerInp');
+      const playerInpInt = document.getElementById('playerInpInt');
+      const calcFunc = window.calcResult || (typeof calcResult === 'function' ? calcResult : null);
+
+      if (playerInp || playerInpInt) {
+        if (isKK && playerInpInt) {
+          playerInpInt.value = Math.floor(playerScore);
+        } else if (!isKK) {
+          if (playerInp) playerInp.value = playerScore.toFixed(1);
+          if (playerInpInt) playerInpInt.value = Math.floor(playerScore);
+        }
+
+        // Directly trigger the result calculation in index.html
+        if (typeof calcFunc === 'function') {
+          calcFunc();
+        } else if (typeof window.showGameOver === 'function') {
+          window.showGameOver(playerScore, botScore, null, Math.floor(playerScore));
+        }
+
+        setTimeout(() => {
+          if (typeof window.restartGame === 'function') {
+            window.restartGame();
+          }
+        }, 5000);
+      }
+    });
+
+    // Score input → enable compare button
+    scoreInput.addEventListener('input', () => {
+      const val = parseFloat(scoreInput.value);
+      compareBtn.disabled = isNaN(val) || val < 0;
+    });
+    // Enter key → compare
+    scoreInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') compareBtn.click();
+    });
+
+    // Raw OCR toggle
+    rawToggle.addEventListener('click', () => {
+      rawText.classList.toggle('visible');
+      rawToggle.textContent = rawText.classList.contains('visible')
+        ? '▼ OCR-Rohtext ausblenden'
+        : '▶ OCR-Rohtext anzeigen';
+    });
+
+    // Swipe-down to close
+    let startY = 0;
+    const sheet = overlay.querySelector('.ic-sheet');
+    sheet.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; }, { passive: true });
+    sheet.addEventListener('touchend', (e) => {
+      const dy = e.changedTouches[0].clientY - startY;
+      if (dy > 80) closeOverlay();
+    }, { passive: true });
+  }
+
+  function closeOverlay() {
+    const overlay = document.getElementById('icOverlay');
+    if (overlay) {
+      overlay.style.opacity = '0';
+      overlay.style.pointerEvents = 'none';
+      overlay.style.transition = 'opacity .2s';
+      
+      const isKK = overlay.dataset.isKK === 'true'; // Retrieve isKK from dataset
+      resetUploadZone(overlay, isKK); // Reset UI state
+    }
+    _isProcessing = false;
+  }
+
+  /* ─── IMAGE PROCESSING FLOW ─────────────── */
+  async function handleImageFile(file, overlay, botScore, isKK, discipline = null) {
+    if (_isProcessing) return;
+    _isProcessing = true;
+
+    // Improvement #6: OCR-Ergebnis-Cache
+    const cacheKey = getCacheKey(file);
+    const cachedResult = _ocrCache.get(cacheKey);
+
+    const uploadZone = overlay.querySelector('#icUploadZone');
+    const progress = overlay.querySelector('#icProgress');
+    const progressFill = overlay.querySelector('#icProgressFill');
+    const progressStatus = overlay.querySelector('#icProgressStatus');
+    const resultCard = overlay.querySelector('#icResultCard');
+    const detectedValue = overlay.querySelector('#icDetectedValue');
+    const detectedLabel = overlay.querySelector('#icDetectedLabel');
+    const scoreInput = overlay.querySelector('#icScoreInput');
+    const compareBtn = overlay.querySelector('#icCompareBtn');
+    const rawText = overlay.querySelector('#icRawText');
+
+    const objectUrl = URL.createObjectURL(file);
+
+    uploadZone.classList.add('has-image');
+    // Hide original upload elements
+    uploadZone.querySelector('.ic-upload-icon').style.display = 'none';
+    uploadZone.querySelector('.ic-upload-text').style.display = 'none';
+    uploadZone.querySelector('.ic-upload-sub').style.display = 'none';
+    uploadZone.querySelector('#icFileInput').style.display = 'none'; // Hide the input itself
+
+    // Create and append preview
+    const previewWrap = document.createElement('div');
+    previewWrap.className = 'ic-preview-wrap';
+    previewWrap.innerHTML = `
+  < img class="ic-preview-img" src = "${objectUrl}" alt = "Upload" id = "icPreviewImg" >
+    <div class="ic-remove-img" id="icRemoveImg" title="Bild entfernen">✕</div>
+`;
+    uploadZone.appendChild(previewWrap);
+
+    const removeBtn = previewWrap.querySelector('#icRemoveImg');
     if (removeBtn) {
       removeBtn.addEventListener('click', (ev) => {
         ev.stopPropagation();
@@ -1042,10 +1198,10 @@ window.ImageCompare = (function () {
           w: Math.round(bb.w * imgW),
           h: Math.round(bb.h * imgH)
         };
-        progressStatus.textContent = `✓ Monitor erkannt (${Math.round(monitorResult.confidence * 100)}%) — Auto-Crop aktiv`;
+        progressStatus.textContent = `✓ Monitor erkannt(${ Math.round(monitorResult.confidence * 100) } %) — Auto - Crop aktiv`;
         await delay(400);
       } else if (monitorResult.confidence > 0) {
-        progressStatus.textContent = `✓ Monitor erkannt (${Math.round(monitorResult.confidence * 100)}%)`;
+        progressStatus.textContent = `✓ Monitor erkannt(${ Math.round(monitorResult.confidence * 100) } %)`;
         await delay(300);
       }
 
@@ -1055,7 +1211,7 @@ window.ImageCompare = (function () {
       _ocrProgressCallback = (prog) => {
         const pct = Math.round(30 + prog * 50);
         progressFill.style.width = pct + '%';
-        progressStatus.textContent = `Texterkennung… ${Math.round(prog * 100)}% `;
+        progressStatus.textContent = `Texterkennung… ${ Math.round(prog * 100) }% `;
       };
 
       const worker = await getWorker();
@@ -1104,7 +1260,7 @@ window.ImageCompare = (function () {
           const pass = OCR_PASSES[i];
           if (bestConf >= pass.triggerBelow) continue;
 
-          progressStatus.textContent = `Analysiere Bild(${pass.name}, Pass ${i + 1} / ${OCR_PASSES.length})…`;
+          progressStatus.textContent = `Analysiere Bild(${ pass.name }, Pass ${ i + 1} / ${OCR_PASSES.length})…`;
           progressFill.style.width = Math.round(30 + (i / OCR_PASSES.length) * 60) + '%';
 
           const prepOptions = { ...pass.options, crop };
@@ -1189,7 +1345,7 @@ window.ImageCompare = (function () {
       const displayVal = isKK ? Math.floor(best.value) : best.value.toFixed(1);
       detectedValue.textContent = displayVal;
       const typeLabel = (best.type === 'decimal') ? 'Dezimalzahl' : 'Ganzzahl';
-      detectedLabel.innerHTML = `Typ: ${typeLabel} · Konfidenz: ${Math.round(best.confidence * 100)}% `;
+      detectedLabel.innerHTML = `Typ: ${ typeLabel } · Konfidenz: ${ Math.round(best.confidence * 100) }% `;
       scoreInput.value = displayVal;
       compareBtn.disabled = false;
 
@@ -1236,29 +1392,49 @@ window.ImageCompare = (function () {
     const uploadZone = overlay.querySelector('#icUploadZone');
     const progress = overlay.querySelector('#icProgress');
     const resultCard = overlay.querySelector('#icResultCard');
-    const comparison = overlay.querySelector('#icComparison');
     const compareBtn = overlay.querySelector('#icCompareBtn');
+    const btnWrong = overlay.querySelector('#icBtnWrong');
+    const editScoreBlock = overlay.querySelector('#icEditScoreBlock');
+    const scoreInput = overlay.querySelector('#icScoreInput');
+    const detectedValue = overlay.querySelector('#icDetectedValue');
+    const detectedLabel = overlay.querySelector('#icDetectedLabel');
+    const rawText = overlay.querySelector('#icRawText');
+    const rawToggle = overlay.querySelector('#icRawToggle');
+    const altChips = overlay.querySelector('.ic-alt-chips');
+    const previewWrap = uploadZone.querySelector('.ic-preview-wrap');
 
+    // Remove any existing preview
+    if (previewWrap) {
+      previewWrap.remove();
+    }
+
+    // Show original upload elements
     uploadZone.classList.remove('has-image');
-    uploadZone.innerHTML = `
-  < input type = "file" class="ic-upload-input" id = "icFileInput"
-accept = "image/*" capture = "environment" >
-      <span class="ic-upload-icon">📸</span>
-      <div class="ic-upload-text">Foto der Ergebnisanzeige<br>hochladen oder aufnehmen</div>
-      <div class="ic-upload-sub">JPG, PNG · Kamera oder Galerie</div>
-`;
+    uploadZone.querySelector('.ic-upload-icon').style.display = '';
+    uploadZone.querySelector('.ic-upload-text').style.display = '';
+    uploadZone.querySelector('.ic-upload-sub').style.display = '';
+    uploadZone.querySelector('#icFileInput').style.display = ''; // Ensure input is visible
+
+    // Reset visual states
     progress.classList.remove('active');
     resultCard.classList.remove('active');
-    comparison.classList.remove('active');
     compareBtn.disabled = true;
+    if (btnWrong) btnWrong.style.display = 'block';
+    if (editScoreBlock) editScoreBlock.style.display = 'none';
+    if (altChips) altChips.remove();
+    rawText.classList.remove('visible');
+    rawToggle.textContent = '▶ OCR-Rohtext anzeigen';
 
-    // Re-attach file input listener
-    const newInput = overlay.querySelector('#icFileInput');
-    const botScore = parseFloat(overlay.dataset.botScore) || 0;
-    newInput.addEventListener('change', (e) => {
-      const file = e.target.files[0];
-      if (file) handleImageFile(file, overlay, botScore, isKK);
-    });
+    // Reset content
+    detectedValue.textContent = '–';
+    detectedLabel.textContent = 'Wird analysiert…';
+
+    if (scoreInput) {
+      scoreInput.value = '';
+      scoreInput.placeholder = isKK ? 'z.B. 392' : 'z.B. 405.2';
+      scoreInput.step = isKK ? '1' : '0.1';
+      scoreInput.inputMode = isKK ? 'numeric' : 'decimal';
+    }
   }
 
   /* ─── KI-FEEDBACK UPLOAD (FORMSPREE) ──────────── */
@@ -1270,92 +1446,87 @@ accept = "image/*" capture = "environment" >
     }
 
     try {
-      console.info(`[ImageCompare] Sende Fehler-Feedback an Formspree...`);
+      console.info(`[ImageCompare] Sende Fehler - Feedback an Formspree...`);
       const url = `https://formspree.io/f/${Brain.FORMSPREE_ENDPOINT}`;
 
-      const formData = new FormData();
-      formData.append('Fehlerbericht', 'KI lag falsch');
-      formData.append('KI_dachte', actualScore);
-      formData.append('Wahrer_Score', expectedScore);
-      formData.append('Foto_Upload', file, file.name || 'feedback.jpg');
+const formData = new FormData();
+formData.append('Fehlerbericht', 'KI lag falsch');
+formData.append('KI_dachte', actualScore);
+formData.append('Wahrer_Score', expectedScore);
+formData.append('Foto_Upload', file, file.name || 'feedback.jpg');
 
-      fetch(url, {
-        method: 'POST',
-        body: formData,
-        headers: {
-          'Accept': 'application/json'
-        }
-      }).catch(e => console.warn('[ImageCompare] Formspree-Upload fehlgeschlagen:', e));
+fetch(url, {
+  method: 'POST',
+  body: formData,
+  headers: {
+    'Accept': 'application/json'
+  }
+}).catch(e => console.warn('[ImageCompare] Formspree-Upload fehlgeschlagen:', e));
     } catch (e) {
-      console.warn('[ImageCompare] Formspree-Fehler:', e);
-    }
+  console.warn('[ImageCompare] Formspree-Fehler:', e);
+}
   }
 
 
 
-  /* ─── UTILITIES ──────────────────────────── */
-  function delay(ms) {
-    return new Promise(r => setTimeout(r, ms));
-  }
+/* ─── UTILITIES ──────────────────────────── */
+function delay(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
 
-  /* ─── PUBLIC API ─────────────────────────── */
-  return {
-    /**
-     * Initialize: inject CSS styles
-     */
-    init() {
-      injectStyles();
-    },
+/* ─── PUBLIC API ─────────────────────────── */
+return {
+  /**
+   * Initialize: inject CSS styles
+   */
+  init() {
+    injectStyles();
+  },
 
-    /**
-     * Open the image upload & comparison overlay.
-     * @param {number} botScore - The bot's total score from the current game
-     * @param {boolean} isKK - Whether the current weapon is KK (integer scoring)
-     * @param {string} discipline - Context string ('LG_40', 'KK_30') to enforce validation limits
-     */
-    open(botScore, isKK, discipline = null) {
-      // Pre-warm: Tesseract + TF.js parallel vorladen
-      ensureTesseract().catch(e => console.warn('[ImageCompare] Tesseract pre-warm fehlgeschlagen:', e));
-      loadTFModel().catch(() => { }); // Modell im Hintergrund laden (Fehler = OK)
-      injectStyles();
-      const overlay = createOverlay(botScore || 0, !!isKK);
-      overlay.dataset.botScore = botScore || 0;
-      if (discipline) {
-        overlay.dataset.discipline = discipline;
-      }
+  /**
+   * Open the image upload & comparison overlay.
+   * @param {number} botScore - The bot's total score from the current game
+   * @param {boolean} isKK - Whether the current weapon is KK (integer scoring)
+   * @param {string} discipline - Context string ('LG_40', 'KK_30') to enforce validation limits
+   */
+  open(botScore, isKK, discipline = null) {
+    // Pre-warm: Tesseract + TF.js parallel vorladen
+    ensureTesseract().catch(e => console.warn('[ImageCompare] Tesseract pre-warm fehlgeschlagen:', e));
+    loadTFModel().catch(() => { }); // Modell im Hintergrund laden (Fehler = OK)
+    injectStyles();
+    const overlay = createOverlay(botScore || 0, !!isKK);
+    if (!overlay) return;
+    overlay.dataset.discipline = discipline;
+  },
 
-      const fileInput = overlay.querySelector('#icFileInput');
-      if (fileInput) {
-        fileInput.addEventListener('change', (e) => {
-          if (e.target.files && e.target.files.length > 0) {
-            handleImageFile(e.target.files[0], overlay, botScore, isKK);
-          }
-        });
-      }
-    },
+/**
+ * Create a small upload button for the game-over screen
+ * @param {HTMLElement} container - The DOM element to insert the button into
+ * @param {number} botScore - The bot's total score
+ * @param {boolean} isKK - Whether scoring is integer (KK)
+ * @param {string} discipline - Context string ('LG_40', 'KK_30') to enforce validation limits
+ */
+createGameOverButton(container, botScore, isKK, discipline = null) {
+  // #region agent log
+  fetch('http://127.0.0.1:7658/ingest/29da7a83-0bde-4827-be31-ec2f34b47ad4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cfa0c1'},body:JSON.stringify({sessionId:'cfa0c1',location:'image-compare.js:createGameOverButton',message:'createGameOverButton called',data:{hasContainer:!!container,hasDuplicate:container?!!container.querySelector('.ic-go-upload-btn'):null},hypothesisId:'E',timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+  if (!container) return;
+  injectStyles();
 
-    /**
-     * Create a small upload button for the game-over screen
-     * @param {HTMLElement} container - The DOM element to insert the button into
-     * @param {number} botScore - The bot's total score
-     * @param {boolean} isKK - Whether scoring is integer (KK)
-     * @param {string} discipline - Context string ('LG_40', 'KK_30') to enforce validation limits
-     */
-    createGameOverButton(container, botScore, isKK, discipline = null) {
-      if (!container) return;
-      injectStyles();
+  // Don't add duplicate buttons
+  if (container.querySelector('.ic-go-upload-btn')) return;
 
-      // Don't add duplicate buttons
-      if (container.querySelector('.ic-go-upload-btn')) return;
+  const btn = document.createElement('button');
+  btn.className = 'ic-go-upload-btn';
+  btn.innerHTML = '<span class="ic-go-upload-ico">📸</span> Foto schießen';
+  btn.addEventListener('click', () => {
+    this.open(botScore, isKK, discipline);
+  });
 
-      const btn = document.createElement('button');
-      btn.className = 'ic-go-upload-btn';
-      btn.innerHTML = '<span class="ic-go-upload-ico">�</span> Wettkampf-Foto vergleichen';
-      btn.addEventListener('click', () => {
-        this.open(botScore, isKK, discipline);
-      });
-
-      container.appendChild(btn);
-    }
+  container.appendChild(btn);
+  // #region agent log
+  fetch('http://127.0.0.1:7658/ingest/29da7a83-0bde-4827-be31-ec2f34b47ad4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cfa0c1'},body:JSON.stringify({sessionId:'cfa0c1',location:'image-compare.js:createGameOverButton',message:'Button appended',data:{childCount:container.childElementCount},hypothesisId:'F',timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+}
   };
-})();
+}) ();
