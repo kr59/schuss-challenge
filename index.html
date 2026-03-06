@@ -7070,6 +7070,74 @@
       });
     }
   </script>
+
+  <!-- 📷 FOTO-ANALYSE OVERLAY (Initially Hidden) -->
+  <div class="ic-overlay" id="icOverlay" style="opacity: 0; pointer-events: none;">
+    <div class="ic-sheet">
+      <div class="ic-handle"></div>
+      <div class="ic-header">
+        <div class="ic-title">📷 FOTO-ANALYSE</div>
+        <div class="ic-close" id="icClose">✕</div>
+      </div>
+      <div class="ic-body">
+        <!-- Upload Zone -->
+        <div class="ic-upload-zone" id="icUploadZone">
+          <input type="file" class="ic-upload-input" id="icFileInput" accept="image/*" capture="environment">
+          <span class="ic-upload-icon">📸</span>
+          <div class="ic-upload-text">Foto der Ergebnisanzeige<br>hochladen oder aufnehmen</div>
+          <div class="ic-upload-sub">JPG, PNG · Kamera oder Galerie</div>
+        </div>
+
+        <!-- Progress -->
+        <div class="ic-progress" id="icProgress">
+          <div class="ic-progress-label">🤖 KI-Analyse</div>
+          <div class="ic-progress-bar">
+            <div class="ic-progress-fill" id="icProgressFill"></div>
+          </div>
+          <div class="ic-progress-status" id="icProgressStatus">Wird vorbereitet…</div>
+        </div>
+
+        <!-- Result -->
+        <div class="ic-result-card" id="icResultCard">
+          <div class="ic-result-header">◈ Erkanntes Ergebnis</div>
+          <div class="ic-detected-score">
+            <span class="ic-detected-icon">🎯</span>
+            <div class="ic-detected-info">
+              <div class="ic-detected-value" id="icDetectedValue">–</div>
+              <div class="ic-detected-label" id="icDetectedLabel">Wird analysiert…</div>
+            </div>
+          </div>
+
+          <!-- Toggle for manual correction -->
+          <button id="icBtnWrong"
+            style="width:100%; margin-top: 12px; background: rgba(240,80,60,0.15); color: #f0503c; border: 1px solid rgba(240,80,60,0.3); padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer;">
+            ❌ Falsch erkannt? Hier korrigieren
+          </button>
+
+          <div class="ic-edit-score" id="icEditScoreBlock" style="display:none; margin-top: 12px;">
+            <div class="ic-edit-hint" style="color:#f0503c; margin-bottom: 8px;">✏️ Bitte richtiges Ergebnis eintragen:
+            </div>
+            <input type="number" class="ic-score-input" id="icScoreInput" placeholder="z.B. 104.2" step="0.1" min="0"
+              max="660" inputmode="decimal">
+          </div>
+
+          <!-- Raw OCR text toggle -->
+          <div class="ic-raw-toggle" id="icRawToggle">▶ OCR-Rohtext anzeigen</div>
+          <div class="ic-raw-text" id="icRawText"></div>
+        </div>
+
+        <!-- Compare Button -->
+        <button class="ic-compare-btn" id="icCompareBtn" disabled>
+          ✅ ERGEBNIS ÜBERNEHMEN
+        </button>
+
+        <div class="ic-info">
+          🔒 Dein Foto wird <b>nur lokal</b> im Browser analysiert.<br>
+          Es wird nichts hochgeladen. 100% offline & kostenlos.
+        </div>
+      </div>
+    </div>
+  </div>
 </body>
 
 </html>
