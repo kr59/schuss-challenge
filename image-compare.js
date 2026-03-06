@@ -783,13 +783,20 @@ window.ImageCompare = (function () {
                 <div class="ic-detected-label" id="icDetectedLabel">Wird analysiert…</div>
               </div>
             </div>
-            <div class="ic-edit-score">
+            </div>
+
+            <!-- NEW: Toggle for manual correction -->
+            <button id="icBtnWrong" style="width:100%; margin-top: 12px; background: rgba(240,80,60,0.15); color: #f0503c; border: 1px solid rgba(240,80,60,0.3); padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer;">
+              ❌ Falsch erkannt? Hier korrigieren
+            </button>
+
+            <div class="ic-edit-score" id="icEditScoreBlock" style="display:none; margin-top: 12px;">
+              <div class="ic-edit-hint" style="color:#f0503c; margin-bottom: 8px;">✏️ Bitte richtiges Ergebnis eintragen:</div>
               <input type="number" class="ic-score-input" id="icScoreInput"
                      placeholder="${isKK ? 'z.B. 392' : 'z.B. 405.2'}"
                      step="${isKK ? '1' : '0.1'}" min="0" max="660"
                      inputmode="${isKK ? 'numeric' : 'decimal'}">
             </div>
-            <div class="ic-edit-hint">✏️ Ergebnis oben korrigieren, falls die KI ungenau war</div>
 
             <!-- Raw OCR text toggle -->
             <div class="ic-raw-toggle" id="icRawToggle">▶ OCR-Rohtext anzeigen</div>
@@ -798,11 +805,8 @@ window.ImageCompare = (function () {
 
           <!-- Compare Button -->
           <button class="ic-compare-btn" id="icCompareBtn" disabled>
-            ⚡ VERGLEICH STARTEN
+            ✅ ERGEBNIS ÜBERNEHMEN
           </button>
-
-          <!-- Comparison Result (hidden until compare) -->
-          <div class="ic-comparison" id="icComparison"></div>
 
           <div class="ic-info">
             🔒 Dein Foto wird <b>nur lokal</b> im Browser analysiert.<br>
@@ -825,12 +829,23 @@ window.ImageCompare = (function () {
     const rawToggle = overlay.querySelector('#icRawToggle');
     const rawText = overlay.querySelector('#icRawText');
     const scoreInput = overlay.querySelector('#icScoreInput');
+    const btnWrong = overlay.querySelector('#icBtnWrong');
+    const editScoreBlock = overlay.querySelector('#icEditScoreBlock');
 
     // Close
     closeBtn.addEventListener('click', () => closeOverlay());
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) closeOverlay();
     });
+
+    // Toggle wrong button
+    if (btnWrong) {
+      btnWrong.addEventListener('click', () => {
+        btnWrong.style.display = 'none';
+        editScoreBlock.style.display = 'block';
+        scoreInput.focus();
+      });
+    }
 
     // File input
     fileInput.addEventListener('change', (e) => {
@@ -855,15 +870,49 @@ window.ImageCompare = (function () {
       }
     });
 
-    // Compare button
+    // Compare button (now the final submit)
     compareBtn.addEventListener('click', () => {
-      const val = parseFloat(scoreInput.value);
-      if (isNaN(val) || val < 0) {
+      const playerScore = parseFloat(scoreInput.value);
+      if (isNaN(playerScore) || playerScore < 0) {
         scoreInput.style.borderColor = 'rgba(240,80,60,.6)';
         setTimeout(() => { scoreInput.style.borderColor = ''; }, 1200);
         return;
       }
-      showComparison(overlay, val, botScore, isKK);
+
+      // Feedback-Upload prüfen
+      const originalDetected = overlay.dataset.detectedScore ? parseFloat(overlay.dataset.detectedScore) : -1;
+      if (Brain.FEEDBACK_ENABLED && overlay._currentFile && originalDetected >= 0 && originalDetected !== playerScore) {
+        sendToFormspree(overlay._currentFile, playerScore, originalDetected);
+      }
+
+      closeOverlay();
+
+      // Trigger the real main game over
+      const playerInp = document.getElementById('playerInp');
+      const playerInpInt = document.getElementById('playerInpInt');
+      const calcFunc = window.calcResult || (typeof calcResult === 'function' ? calcResult : null);
+
+      if (playerInp || playerInpInt) {
+        if (isKK && playerInpInt) {
+          playerInpInt.value = Math.floor(playerScore);
+        } else if (!isKK) {
+          if (playerInp) playerInp.value = playerScore.toFixed(1);
+          if (playerInpInt) playerInpInt.value = Math.floor(playerScore);
+        }
+
+        // Directly trigger the result calculation in index.html
+        if (typeof calcFunc === 'function') {
+          calcFunc();
+        } else if (typeof window.showGameOver === 'function') {
+          window.showGameOver(playerScore, botScore, null, Math.floor(playerScore));
+        }
+
+        setTimeout(() => {
+          if (typeof window.restartGame === 'function') {
+            window.restartGame();
+          }
+        }, 5000);
+      }
     });
 
     // Score input → enable compare button
@@ -1242,135 +1291,7 @@ accept = "image/*" capture = "environment" >
     }
   }
 
-  /* ─── COMPARISON RESULT ─────────────────── */
-  function showComparison(overlay, playerScore, botScore, isKK) {
-    const comparison = overlay.querySelector('#icComparison');
-    if (!comparison) return;
 
-    const diff = playerScore - botScore;
-    const absDiff = Math.abs(diff);
-    let resultClass, resultEmoji, resultText, diffText;
-
-    if (diff > 0.05) {
-      resultClass = 'win';
-      resultEmoji = '🏆';
-      resultText = 'DU GEWINNST!';
-      diffText = isKK
-        ? `+ ${Math.round(absDiff)} Ringe Vorsprung`
-        : `+ ${absDiff.toFixed(1)} Punkte Vorsprung`;
-    } else if (diff < -0.05) {
-      resultClass = 'lose';
-      resultEmoji = '😔';
-      resultText = 'BOT GEWINNT';
-      diffText = isKK
-        ? `−${Math.round(absDiff)} Ringe Rückstand`
-        : `−${absDiff.toFixed(1)} Punkte Rückstand`;
-    } else {
-      resultClass = 'draw';
-      resultEmoji = '🤝';
-      resultText = 'UNENTSCHIEDEN!';
-      diffText = 'Punktgleich!';
-    }
-
-    // Calculate bar widths
-    const total = playerScore + botScore;
-    const playerPct = total > 0 ? Math.round((playerScore / total) * 100) : 50;
-    const botPct = 100 - playerPct;
-
-    const playerDisplay = isKK ? Math.floor(playerScore) : playerScore.toFixed(1);
-    const botDisplay = isKK ? Math.floor(botScore) : botScore.toFixed(1);
-
-    comparison.innerHTML = `
-      <div style="text-align:center;font-size:2rem;margin-bottom:-4px;">${resultEmoji}</div>
-      <div class="ic-comp-title ${resultClass}">${resultText}</div>
-      <div class="ic-comp-scores">
-        <div class="ic-comp-side">
-          <div class="ic-comp-who">👧 Du</div>
-          <div class="ic-comp-pts player">${playerDisplay}</div>
-        </div>
-        <div class="ic-comp-vs">VS</div>
-        <div class="ic-comp-side">
-          <div class="ic-comp-who">🤖 Bot</div>
-          <div class="ic-comp-pts bot">${botDisplay}</div>
-        </div>
-      </div>
-      <div class="ic-bar-wrap">
-        <div class="ic-bar-player" style="width:${playerPct}%"></div>
-        <div class="ic-bar-bot" style="width:${botPct}%"></div>
-      </div>
-      <div class="ic-comp-diff ${resultClass}">${diffText}</div>
-
-      <!-- Submit Button -->
-      <button class="ic-submit-btn" id="icSubmitBtn">
-        ✅ ERGEBNIS ÜBERNEHMEN
-      </button>
-    `;
-
-    comparison.classList.add('active');
-
-    // Scroll comparison into view
-    setTimeout(() => {
-      comparison.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }, 100);
-
-    // Submit Button Event
-    const submitBtn = comparison.querySelector('#icSubmitBtn');
-    submitBtn.addEventListener('click', () => {
-
-      // Feedback-Upload prüfen:
-      // Falls der User einen anderen Score eingegeben hat als die KI initial dachte
-      const originalDetected = overlay.dataset.detectedScore ? parseFloat(overlay.dataset.detectedScore) : -1;
-      if (Brain.FEEDBACK_ENABLED && overlay._currentFile && originalDetected >= 0 && originalDetected !== playerScore) {
-        sendToFormspree(overlay._currentFile, playerScore, originalDetected);
-      }
-
-      closeOverlay();
-
-      // Get inputs directly from document to be safe
-      const playerInp = document.getElementById('playerInp');
-      const playerInpInt = document.getElementById('playerInpInt');
-      const calcFunc = window.calcResult || (typeof calcResult === 'function' ? calcResult : null);
-
-      if (playerInp || playerInpInt) {
-        if (isKK && playerInpInt) {
-          playerInpInt.value = Math.floor(playerScore);
-        } else if (!isKK) {
-          if (playerInp) playerInp.value = playerScore.toFixed(1);
-          if (playerInpInt) playerInpInt.value = Math.floor(playerScore);
-        }
-
-        // Directly trigger the result calculation in index.html
-        if (typeof calcFunc === 'function') {
-          calcFunc();
-        } else if (typeof window.showGameOver === 'function') {
-          window.showGameOver(playerScore, botScore, null, Math.floor(playerScore));
-        }
-
-        // Feature: Auto-Zurück ins Hauptmenü nach 5 Sekunden, wie vom User gewünscht
-        setTimeout(() => {
-          if (typeof window.restartGame === 'function') {
-            window.restartGame();
-          }
-        }, 5000);
-      }
-    });
-
-    // Play sound if available
-    if (typeof Sounds !== 'undefined') {
-      setTimeout(() => {
-        if (resultClass === 'win') Sounds.win();
-        else if (resultClass === 'lose') Sounds.lose();
-        else Sounds.draw();
-      }, 300);
-    }
-    if (typeof Haptics !== 'undefined') {
-      setTimeout(() => {
-        if (resultClass === 'win') Haptics.win();
-        else if (resultClass === 'lose') Haptics.lose();
-        else Haptics.draw();
-      }, 300);
-    }
-  }
 
   /* ─── UTILITIES ──────────────────────────── */
   function delay(ms) {
