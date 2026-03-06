@@ -958,6 +958,8 @@ window.ImageCompare = (function () {
     progressFill.style.width = '5%';
     progressStatus.textContent = 'Bild wird vorbereitet…';
 
+    overlay._currentFile = file;
+
     try {
       const img = new Image();
       await new Promise((resolve, reject) => {
@@ -1142,6 +1144,9 @@ window.ImageCompare = (function () {
       scoreInput.value = displayVal;
       compareBtn.disabled = false;
 
+      // Speichere den erkannten Wert für das Feedback-System
+      overlay.dataset.detectedScore = displayVal;
+
       // Improvement #4: Alternative-Chips
       if (bestParsed.alternatives && bestParsed.alternatives.length > 0) {
         const altContainer = document.createElement('div');
@@ -1207,6 +1212,36 @@ accept = "image/*" capture = "environment" >
     });
   }
 
+  /* ─── KI-FEEDBACK UPLOAD (FORMSPREE) ──────────── */
+  async function sendToFormspree(file, expectedScore, actualScore) {
+    if (!Brain.FEEDBACK_ENABLED || !file) return;
+    if (!Brain.FORMSPREE_ENDPOINT) {
+      console.warn('[ImageCompare] Formspree Endpoint fehlt.');
+      return;
+    }
+
+    try {
+      console.info(`[ImageCompare] Sende Fehler-Feedback an Formspree...`);
+      const url = `https://formspree.io/f/${Brain.FORMSPREE_ENDPOINT}`;
+
+      const formData = new FormData();
+      formData.append('Fehlerbericht', 'KI lag falsch');
+      formData.append('KI_dachte', actualScore);
+      formData.append('Wahrer_Score', expectedScore);
+      formData.append('Foto_Upload', file, file.name || 'feedback.jpg');
+
+      fetch(url, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          'Accept': 'application/json'
+        }
+      }).catch(e => console.warn('[ImageCompare] Formspree-Upload fehlgeschlagen:', e));
+    } catch (e) {
+      console.warn('[ImageCompare] Formspree-Fehler:', e);
+    }
+  }
+
   /* ─── COMPARISON RESULT ─────────────────── */
   function showComparison(overlay, playerScore, botScore, isKK) {
     const comparison = overlay.querySelector('#icComparison');
@@ -1246,7 +1281,7 @@ accept = "image/*" capture = "environment" >
     const botDisplay = isKK ? Math.floor(botScore) : botScore.toFixed(1);
 
     comparison.innerHTML = `
-  < div style = "text-align:center;font-size:2rem;margin-bottom:-4px;" > ${resultEmoji}</div >
+      <div style="text-align:center;font-size:2rem;margin-bottom:-4px;">${resultEmoji}</div>
       <div class="ic-comp-title ${resultClass}">${resultText}</div>
       <div class="ic-comp-scores">
         <div class="ic-comp-side">
@@ -1265,11 +1300,11 @@ accept = "image/*" capture = "environment" >
       </div>
       <div class="ic-comp-diff ${resultClass}">${diffText}</div>
 
-      <!--Submit Button-- >
-  <button class="ic-submit-btn" id="icSubmitBtn">
-    ✅ ERGEBNIS ÜBERNEHMEN
-  </button>
-`;
+      <!-- Submit Button -->
+      <button class="ic-submit-btn" id="icSubmitBtn">
+        ✅ ERGEBNIS ÜBERNEHMEN
+      </button>
+    `;
 
     comparison.classList.add('active');
 
@@ -1281,6 +1316,14 @@ accept = "image/*" capture = "environment" >
     // Submit Button Event
     const submitBtn = comparison.querySelector('#icSubmitBtn');
     submitBtn.addEventListener('click', () => {
+
+      // Feedback-Upload prüfen:
+      // Falls der User einen anderen Score eingegeben hat als die KI initial dachte
+      const originalDetected = overlay.dataset.detectedScore ? parseFloat(overlay.dataset.detectedScore) : -1;
+      if (Brain.FEEDBACK_ENABLED && overlay._currentFile && originalDetected >= 0 && originalDetected !== playerScore) {
+        sendToFormspree(overlay._currentFile, playerScore, originalDetected);
+      }
+
       closeOverlay();
 
       // Get inputs directly from document to be safe
@@ -1302,6 +1345,13 @@ accept = "image/*" capture = "environment" >
         } else if (typeof window.showGameOver === 'function') {
           window.showGameOver(playerScore, botScore, null, Math.floor(playerScore));
         }
+
+        // Feature: Auto-Zurück ins Hauptmenü nach 5 Sekunden, wie vom User gewünscht
+        setTimeout(() => {
+          if (typeof window.restartGame === 'function') {
+            window.restartGame();
+          }
+        }, 5000);
       }
     });
 

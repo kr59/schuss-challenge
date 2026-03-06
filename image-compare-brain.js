@@ -33,6 +33,14 @@ window.ImageCompareBrain = (function () {
     /* Labels aus metadata.json deines Teachable Machine Modells */
     const MODEL_LABELS = ['Monitor', 'Nichts'];
 
+    /* ═══ KI-TRAINING FEEDBACK LOOP (FORMSPREE - PER E-MAIL) ════════════
+       Echte User-Fotos (bei denen die KI falsch lag) direkt in dein Postfach!
+       1. Gehe auf formspree.io und erstelle ein kostenloses "Formular"
+       2. Du erhältst einen Link wie: https://formspree.io/f/xyzabcde
+       3. Trag die ID (xyzabcde) hier ein und setze FEEDBACK_ENABLED = true */
+    const FEEDBACK_ENABLED = true;
+    const FORMSPREE_ENDPOINT = 'xreyggrp';
+
     /* ═══ SCORE-KONFIGURATION ═══════════════════════════════════════════ */
 
     /** Zentrale Score-Konfiguration — alle Schwellwerte an einem Ort */
@@ -102,6 +110,8 @@ window.ImageCompareBrain = (function () {
         MODEL_INPUT_SIZE,
         MODEL_LABELS,
         MONITOR_CONFIDENCE_THRESHOLD,
+        FEEDBACK_ENABLED,
+        FORMSPREE_ENDPOINT,
         SCORE_CONFIG,
         OCR_CHAR_FIXES,
         OCR_PASSES,

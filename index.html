@@ -25,7 +25,8 @@
   <script src="haptics.js"></script>
   <script src="sounds.js"></script>
   <script src="tutorial.js"></script>
-  <script src="image-compare.js?v=2.1"></script>
+  <script src="image-compare-brain.js?v=3.0"></script>
+  <script src="image-compare.js?v=3.0"></script>
   <style>
     /* ═══════════════════════════════════════════
    BASE
@@ -6457,7 +6458,7 @@
       if (icSlot) {
         icSlot.innerHTML = '';
         if (typeof ImageCompare !== 'undefined') {
-          ImageCompare.createGameOverButton(icSlot, isKK ? G.botTotalInt : G.botTotal, isKK);
+          ImageCompare.createGameOverButton(icSlot, isKK ? G.botTotalInt : G.botTotal, isKK, G.discipline);
         }
       }
 
