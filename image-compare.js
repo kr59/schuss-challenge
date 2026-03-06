@@ -1,756 +1,541 @@
 /* ═══════════════════════════════════════════════════════════════════════
    IMAGE-COMPARE.JS — KI-gestützte Bilderkennung & Ergebnis-Vergleich
    100% kostenlos · Tesseract.js (Open-Source OCR) · Läuft im Browser
+   ═══════════════════════════════════════════════════════════════════════
+   Architektur:
+     1. KONFIGURATION   — Alle Konstanten & Schwellwerte zentral
+     2. PREPROCESSING    — Modulare Bild-Pipeline (Graustufen → Schärfung → Threshold)
+     3. OCR-ENGINE       — Tesseract.js Lazy-Loading & Multi-Pass-Erkennung
+     4. SCORE-PARSING    — Regelbasierte Punktzahl-Extraktion mit Gewichtung
+     5. UI-RENDERING     — Overlay, Upload, Fortschritt, Vergleich
+     6. PUBLIC API       — init(), open(), createGameOverButton()
    ═══════════════════════════════════════════════════════════════════════ */
 
 window.ImageCompare = (function () {
-    'use strict';
+  'use strict';
 
-    /* ─── PRIVATE STATE ──────────────────────── */
-    let _tesseractReady = false;
-    let _worker = null;
-    let _isProcessing = false;
+  /* ─── PRIVATE STATE ──────────────────────── */
+  let _isProcessing = false;
 
-    /* ─── STYLES (injected once) ─────────────── */
-    const CSS_ID = 'ic-styles-injected';
+  /* ═══ 1. KONFIGURATION ═══════════════════════════════════════════════ */
 
-    function injectStyles() {
-        if (document.getElementById(CSS_ID)) return;
-        const style = document.createElement('style');
-        style.id = CSS_ID;
-        style.textContent = `
-      /* ═══ IMAGE COMPARE OVERLAY ═══ */
-      .ic-overlay {
-        position: fixed;
-        inset: 0;
-        z-index: 950;
-        background: rgba(0,0,0,.7);
-        backdrop-filter: blur(6px);
-        display: flex;
-        align-items: flex-end;
-        justify-content: center;
-        animation: ic-fadeIn .2s ease;
-      }
-      @keyframes ic-fadeIn {
-        from { opacity: 0; }
-        to   { opacity: 1; }
-      }
-      .ic-sheet {
-        width: 100%;
-        max-width: 480px;
-        max-height: 92vh;
-        background: linear-gradient(180deg, #0f1a08 0%, #0a1205 100%);
-        border: 1px solid rgba(120,180,40,.22);
-        border-bottom: none;
-        border-radius: 20px 20px 0 0;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        box-shadow: 0 -8px 48px rgba(0,0,0,.7), inset 0 1px 0 rgba(160,220,60,.08);
-        animation: ic-sheetUp .28s cubic-bezier(.32,1.2,.64,1);
-      }
-      @keyframes ic-sheetUp {
-        from { transform: translateY(60px); opacity: 0; }
-        to   { transform: translateY(0); opacity: 1; }
-      }
-      .ic-handle {
-        width: 36px;
-        height: 4px;
-        background: rgba(120,180,40,.2);
-        border-radius: 2px;
-        margin: 10px auto 0;
-        flex-shrink: 0;
-      }
-      .ic-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 12px 18px 10px;
-        flex-shrink: 0;
-        border-bottom: 1px solid rgba(120,180,40,.12);
-      }
-      .ic-title {
-        font-family: 'Bebas Neue', cursive;
-        font-size: 1.3rem;
-        letter-spacing: .12em;
-        color: #8ecf40;
-        text-shadow: 0 0 12px rgba(120,200,50,.25);
-      }
-      .ic-close {
-        background: rgba(120,180,40,.1);
-        border: 1px solid rgba(120,180,40,.2);
-        border-radius: 50%;
-        width: 30px;
-        height: 30px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        color: rgba(160,200,80,.6);
-        font-size: .9rem;
-        transition: background .2s, color .2s;
-      }
-      .ic-close:hover {
-        background: rgba(120,180,40,.2);
-        color: #fff;
-      }
-      .ic-body {
-        flex: 1;
-        overflow-y: auto;
-        overflow-x: hidden;
-        padding: 16px 18px 24px;
-        display: flex;
-        flex-direction: column;
-        gap: 14px;
-        -webkit-overflow-scrolling: touch;
-      }
+  /** Zentrale Score-Konfiguration — alle Schwellwerte an einem Ort */
+  const SCORE_CONFIG = {
+    VALID_RANGE: { min: 10, max: 660 },
 
-      /* Upload Zone */
-      .ic-upload-zone {
-        border: 2px dashed rgba(120,180,40,.3);
-        border-radius: 16px;
-        padding: 28px 16px;
-        text-align: center;
-        cursor: pointer;
-        transition: all .25s ease;
-        background: rgba(120,180,40,.04);
-        position: relative;
-      }
-      .ic-upload-zone:hover, .ic-upload-zone.dragover {
-        border-color: rgba(120,180,40,.6);
-        background: rgba(120,180,40,.1);
-      }
-      .ic-upload-zone.has-image {
-        padding: 8px;
-        border-style: solid;
-        border-color: rgba(120,180,40,.25);
-      }
-      .ic-upload-icon {
-        font-size: 2.4rem;
-        margin-bottom: 8px;
-        display: block;
-      }
-      .ic-upload-text {
-        font-size: .82rem;
-        color: rgba(200,230,120,.65);
-        font-weight: 500;
-        line-height: 1.5;
-      }
-      .ic-upload-sub {
-        font-size: .62rem;
-        color: rgba(160,200,80,.35);
-        margin-top: 4px;
-        letter-spacing: .05em;
-      }
-      .ic-upload-input {
-        position: absolute;
-        inset: 0;
-        opacity: 0;
-        cursor: pointer;
-        width: 100%;
-        height: 100%;
-      }
-      .ic-preview-wrap {
-        position: relative;
-        border-radius: 12px;
-        overflow: hidden;
-        max-height: 240px;
-      }
-      .ic-preview-img {
-        width: 100%;
-        height: auto;
-        max-height: 240px;
-        object-fit: contain;
-        display: block;
-        border-radius: 12px;
-      }
-      .ic-remove-img {
-        position: absolute;
-        top: 6px;
-        right: 6px;
-        background: rgba(0,0,0,.6);
-        border: 1px solid rgba(255,255,255,.2);
-        border-radius: 50%;
-        width: 26px;
-        height: 26px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        color: #fff;
-        font-size: .8rem;
-        transition: background .2s;
-      }
-      .ic-remove-img:hover {
-        background: rgba(200,60,60,.7);
-      }
+    /* Gewichtungsfaktoren für die Konfidenz-Berechnung */
+    WEIGHTS: {
+      CENTER_FACTOR: 0.5,   // Bonus für Nähe zur Bildmitte
+      KEYWORD_NEAR_BONUS: 1.0,   // Bonus wenn Score nah an Schlüsselwort
+      KEYWORD_MAX_DIST: 15,    // Max. Zeichenabstand für Keyword-Bonus
+      LABELED_TYPE_BONUS: 0.5,   // Bonus für beschriftete Werte
+      FORMAT_MATCH_BONUS: 0.3,   // Bonus wenn Format zur Waffe passt
+      GOOD_GEOMETRY_BONUS: 1.2,   // Bonus für gutes Seitenverhältnis
+      BAD_GEOMETRY_PENALTY: 0.5,  // Malus für unplausibles Seitenverhältnis
+    },
 
-      /* Progress */
-      .ic-progress {
-        display: none;
-        flex-direction: column;
-        gap: 8px;
-        padding: 12px 14px;
-        background: rgba(120,180,40,.06);
-        border: 1px solid rgba(120,180,40,.12);
-        border-radius: 12px;
-      }
-      .ic-progress.active { display: flex; }
-      .ic-progress-label {
-        font-size: .65rem;
-        letter-spacing: .18em;
-        text-transform: uppercase;
-        color: rgba(160,200,80,.5);
-        font-weight: 600;
-      }
-      .ic-progress-bar {
-        height: 6px;
-        background: rgba(120,180,40,.12);
-        border-radius: 3px;
-        overflow: hidden;
-      }
-      .ic-progress-fill {
-        height: 100%;
-        background: linear-gradient(90deg, #3a8010, #8ecf40);
-        border-radius: 3px;
-        width: 0%;
-        transition: width .3s ease;
-      }
-      .ic-progress-status {
-        font-size: .72rem;
-        color: rgba(200,230,120,.6);
-      }
+    /* Schlüsselwörter die auf einen Gesamtscore hindeuten */
+    KEYWORDS: ['gesamt', 'total', 'summe', 'ergebnis', 'result', 'ringe', 'pkt'],
 
-      /* Score Result */
-      .ic-result-card {
-        display: none;
-        flex-direction: column;
-        gap: 10px;
-        padding: 14px;
-        background: rgba(120,180,40,.06);
-        border: 1px solid rgba(120,180,40,.15);
-        border-radius: 14px;
-      }
-      .ic-result-card.active { display: flex; }
-      .ic-result-header {
-        font-size: .6rem;
-        letter-spacing: .22em;
-        text-transform: uppercase;
-        color: rgba(160,200,80,.45);
-        font-weight: 600;
-      }
-      .ic-detected-score {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-      .ic-detected-icon {
-        font-size: 1.6rem;
-        flex-shrink: 0;
-      }
-      .ic-detected-info {
-        flex: 1;
-        min-width: 0;
-      }
-      .ic-detected-value {
-        font-family: 'Bebas Neue', cursive;
-        font-size: 2rem;
-        color: #8ecf40;
-        line-height: 1;
-        text-shadow: 0 0 15px rgba(120,200,50,.3);
-      }
-      .ic-detected-label {
-        font-size: .58rem;
-        color: rgba(160,200,80,.4);
-        margin-top: 2px;
-        letter-spacing: .1em;
-      }
-      .ic-edit-score {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-top: 4px;
-      }
-      .ic-score-input {
-        flex: 1;
-        background: rgba(0,0,0,.3);
-        border: 1px solid rgba(120,180,40,.25);
-        border-radius: 8px;
-        padding: 8px 12px;
-        color: #e8e8e0;
-        font-family: 'DM Mono', monospace;
-        font-size: 1rem;
-        outline: none;
-        transition: border-color .2s;
-      }
-      .ic-score-input:focus {
-        border-color: rgba(120,180,40,.5);
-      }
-      .ic-score-input::placeholder {
-        color: rgba(160,200,80,.25);
-      }
-      .ic-edit-hint {
-        font-size: .58rem;
-        color: rgba(160,200,80,.3);
-        font-style: italic;
-      }
+    /* Plausibles Seitenverhältnis (Höhe/Breite) für Ziffern */
+    GEOMETRY: { MIN: 0.8, MAX: 4.0, GOOD_MIN: 1.2, GOOD_MAX: 2.8 },
+  };
 
-      /* Compare Button */
-      .ic-compare-btn {
-        width: 100%;
-        padding: 13px 20px;
-        background: radial-gradient(circle at center, #8ecf40, #5a8c1e);
-        border: none;
-        border-radius: 12px;
-        color: #fff;
-        font-family: 'Outfit', sans-serif;
-        font-size: .9rem;
-        font-weight: 700;
-        letter-spacing: .08em;
-        text-transform: uppercase;
-        cursor: pointer;
-        text-shadow: 0 1px 3px rgba(0,0,0,.4);
-        box-shadow: 0 4px 20px rgba(100,160,30,.25);
-        transition: transform .15s, box-shadow .15s;
-      }
-      .ic-compare-btn:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 6px 28px rgba(100,160,30,.35);
-      }
-      .ic-compare-btn:active {
-        transform: translateY(0);
-      }
-      .ic-compare-btn:disabled {
-        opacity: .4;
-        cursor: not-allowed;
-        transform: none;
-      }
+  /** OCR-Zeichenkorrekturen: häufige Fehllesungen von Ziffern */
+  const OCR_CHAR_FIXES = [
+    [/[oO]/g, '0'],
+    [/[lI|]/g, '1'],
+    [/[sS](?=\d)/g, '5'],
+    [/[,]/g, '.'],
+  ];
 
-      /* Comparison Result */
-      .ic-comparison {
-        display: none;
-        flex-direction: column;
-        gap: 12px;
-        padding: 14px;
-        background: rgba(120,180,40,.06);
-        border: 1px solid rgba(120,180,40,.15);
-        border-radius: 14px;
-      }
-      .ic-comparison.active { display: flex; }
-      .ic-comp-title {
-        font-family: 'Bebas Neue', cursive;
-        font-size: 1.1rem;
-        letter-spacing: .1em;
-        text-align: center;
-      }
-      .ic-comp-title.win { color: #8ecf40; text-shadow: 0 0 10px rgba(120,200,50,.25); }
-      .ic-comp-title.lose { color: #f08070; text-shadow: 0 0 10px rgba(240,120,100,.25); }
-      .ic-comp-title.draw { color: #ffc840; text-shadow: 0 0 10px rgba(255,200,60,.25); }
+  /** Multi-Pass-OCR Strategie — jeder Pass hat eigene Vorverarbeitungsparameter */
+  const OCR_PASSES = [
+    { name: 'Standard', options: {}, triggerBelow: 1.0 },
+    { name: 'Gamma-Boost', options: { gamma: 1.5 }, triggerBelow: 0.85 },
+    { name: 'Invertiert', options: { invert: true }, triggerBelow: 0.7 },
+  ];
 
-      .ic-comp-scores {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 16px;
-      }
-      .ic-comp-side {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 3px;
-        flex: 1;
-      }
-      .ic-comp-who {
-        font-size: .58rem;
-        letter-spacing: .18em;
-        text-transform: uppercase;
-        color: rgba(200,220,150,.4);
-        font-weight: 600;
-      }
-      .ic-comp-pts {
-        font-family: 'Bebas Neue', cursive;
-        font-size: 2.2rem;
-        line-height: 1;
-      }
-      .ic-comp-pts.player { color: #a0e060; text-shadow: 0 0 12px rgba(140,220,60,.25); }
-      .ic-comp-pts.bot { color: #f08070; text-shadow: 0 0 12px rgba(240,120,100,.25); }
-      .ic-comp-vs {
-        font-family: 'Bebas Neue', cursive;
-        font-size: 1rem;
-        color: rgba(255,255,255,.2);
-        letter-spacing: .1em;
-      }
-      .ic-comp-diff {
-        text-align: center;
-        font-size: .78rem;
-        font-weight: 600;
-        padding: 5px 14px;
-        border-radius: 20px;
-        display: inline-block;
-        align-self: center;
-      }
-      .ic-comp-diff.win {
-        background: rgba(120,200,50,.1);
-        border: 1px solid rgba(120,200,50,.3);
-        color: #a0e060;
-      }
-      .ic-comp-diff.lose {
-        background: rgba(240,100,80,.1);
-        border: 1px solid rgba(240,100,80,.3);
-        color: #f08070;
-      }
-      .ic-comp-diff.draw {
-        background: rgba(255,200,60,.1);
-        border: 1px solid rgba(255,200,60,.3);
-        color: #ffc840;
-      }
+  /* ─── Textbereinigung (zentral, einmalig definiert) ─── */
+  function cleanOCRText(text) {
+    let clean = text;
+    for (const [pattern, replacement] of OCR_CHAR_FIXES) {
+      clean = clean.replace(pattern, replacement);
+    }
+    return clean.replace(/\s+/g, ' ');
+  }
 
-      /* Visual Bar */
-      .ic-bar-wrap {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        height: 24px;
-      }
-      .ic-bar-player {
-        height: 100%;
-        background: linear-gradient(90deg, #3a8010, #8ecf40);
-        border-radius: 6px 0 0 6px;
-        transition: width .6s cubic-bezier(.34,1.56,.64,1);
-        min-width: 4px;
-      }
-      .ic-bar-bot {
-        height: 100%;
-        background: linear-gradient(90deg, #d04030, #f08070);
-        border-radius: 0 6px 6px 0;
-        transition: width .6s cubic-bezier(.34,1.56,.64,1);
-        min-width: 4px;
-      }
+  /* ─── PRIVATE STATE (erweitert) ─── */
+  let _worker = null;          // Improvement #2: Worker-Singleton
+  const _ocrCache = new Map(); // Improvement #6: OCR-Ergebnis-Cache
+  const OCR_CACHE_MAX = 5;
 
-      /* OCR Raw Text (collapsed by default) */
-      .ic-raw-toggle {
-        font-size: .62rem;
-        color: rgba(160,200,80,.35);
-        cursor: pointer;
-        text-align: center;
-        padding: 4px;
-        letter-spacing: .08em;
-        transition: color .2s;
-      }
-      .ic-raw-toggle:hover { color: rgba(160,200,80,.6); }
-      .ic-raw-text {
-        display: none;
-        background: rgba(0,0,0,.3);
-        border: 1px solid rgba(120,180,40,.1);
-        border-radius: 8px;
-        padding: 10px 12px;
-        font-family: 'DM Mono', monospace;
-        font-size: .68rem;
-        color: rgba(200,220,150,.45);
-        line-height: 1.6;
-        white-space: pre-wrap;
-        word-break: break-all;
-        max-height: 160px;
-        overflow-y: auto;
-      }
-      .ic-raw-text.visible { display: block; }
+  function injectStyles() {
+    if (document.getElementById(CSS_ID)) return;
+    const link = document.createElement('link');
+    link.id = CSS_ID;
+    link.rel = 'stylesheet';
+    link.href = 'image-compare.css';
+    document.head.appendChild(link);
+  }
 
-      /* Info hint */
-      .ic-info {
-        font-size: .62rem;
-        color: rgba(160,200,80,.3);
-        text-align: center;
-        line-height: 1.5;
-        padding: 0 8px;
-        margin-top: 12px;
-      }
+  /* ═══ 2b. WORKER-SINGLETON ═══════════════════════════════════════════ */
 
-      /* Submit Button */
-      .ic-submit-btn {
-        width: 100%;
-        margin-top: 20px;
-        padding: 14px;
-        background: linear-gradient(135deg, #7ab030, #5a8c1e);
-        border: 1px solid #8ecf40;
-        border-radius: 12px;
-        color: #fff;
-        font-family: 'Outfit', sans-serif;
-        font-size: .95rem;
-        font-weight: 700;
-        letter-spacing: .08em;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 8px;
-        box-shadow: 0 4px 15px rgba(120,180,40,.2);
-        transition: all .2s;
-      }
-      .ic-submit-btn:hover {
-        background: linear-gradient(135deg, #8ecf40, #6ca024);
-        transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(120,180,40,.3);
-      }
-      .ic-submit-btn:active {
-        transform: translateY(1px);
-      }
+  let _ocrProgressCallback = null;
 
-      /* Game Over Upload Button */
-      .ic-go-upload-btn {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 8px;
-        width: 100%;
-        max-width: 320px;
-        margin: 8px auto 4px;
-        padding: 11px 18px;
-        background: rgba(120,180,40,.1);
-        border: 1px solid rgba(120,180,40,.25);
-        border-radius: 12px;
-        color: rgba(180,230,80,.8);
-        font-family: 'Outfit', sans-serif;
-        font-size: .78rem;
-        font-weight: 600;
-        letter-spacing: .06em;
-        cursor: pointer;
-        transition: all .2s ease;
-        position: relative;
-        z-index: 1;
+  /** Erstellt oder gibt den persistenten Tesseract-Worker zurück */
+  async function getWorker() {
+    await ensureTesseract();
+
+    if (_worker) return _worker;
+
+    _worker = await Tesseract.createWorker('deu+eng', 1, {
+      logger: (info) => {
+        if (info.status === 'recognizing text' && _ocrProgressCallback) {
+          _ocrProgressCallback(info.progress);
+        }
       }
-      .ic-go-upload-btn:hover {
-        background: rgba(120,180,40,.16);
-        border-color: rgba(120,180,40,.4);
-        color: #a0e060;
+    });
+
+    await _worker.setParameters({
+      tessedit_char_whitelist: '0123456789., \n',
+      tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT
+    });
+
+    return _worker;
+  }
+
+  /** Worker explizit beenden (für Cleanup) */
+  async function terminateWorker() {
+    if (_worker) {
+      await _worker.terminate();
+      _worker = null;
+    }
+  }
+
+  /* ═══ 3. ROI-ERKENNUNG ═══════════════════════════════════════════════ */
+
+  /**
+   * Erkennt die Region of Interest (Bereich mit höchster Textdichte).
+   * Analysiert zeilenweise Schwarzpixel-Verteilung nach dem Threshold.
+   * @returns {{ x, y, w, h } | null} — Crop-Koordinaten oder null
+   */
+  function detectROI(imageData, w, h) {
+    const d = imageData.data;
+    const MIN_DENSITY = 0.03;     // Min. 3% schwarze Pixel pro Zeile
+    const MIN_BLOCK_HEIGHT = 0.05; // Min. 5% der Bildhöhe
+
+    // Zeilenweise Schwarzpixel-Dichte berechnen
+    const rowDensity = new Float32Array(h);
+    for (let y = 0; y < h; y++) {
+      let blackCount = 0;
+      for (let x = 0; x < w; x++) {
+        if (d[(y * w + x) * 4] === 0) blackCount++;
       }
-      .ic-go-upload-btn:active {
-        background: rgba(120,180,40,.22);
-      }
-      .ic-go-upload-ico { font-size: 1.1rem; }
-    `;
-        document.head.appendChild(style);
+      rowDensity[y] = blackCount / w;
     }
 
-    /* ─── TESSERACT.JS LAZY LOADING ──────────── */
-    function ensureTesseract() {
-        return new Promise((resolve, reject) => {
-            if (typeof Tesseract !== 'undefined') {
-                resolve();
-                return;
+    // Dichtesten zusammenhängenden Block finden
+    let bestStart = 0, bestEnd = h - 1, bestScore = 0;
+    let blockStart = -1;
+
+    for (let y = 0; y < h; y++) {
+      if (rowDensity[y] >= MIN_DENSITY) {
+        if (blockStart === -1) blockStart = y;
+      } else {
+        if (blockStart !== -1) {
+          const blockH = y - blockStart;
+          if (blockH >= h * MIN_BLOCK_HEIGHT) {
+            // Score = Höhe × durchschnittliche Dichte
+            let totalDensity = 0;
+            for (let i = blockStart; i < y; i++) totalDensity += rowDensity[i];
+            const score = blockH * (totalDensity / blockH);
+            if (score > bestScore) {
+              bestScore = score;
+              bestStart = blockStart;
+              bestEnd = y;
             }
-            // Check if script is already loading
-            if (document.querySelector('script[data-ic-tesseract]')) {
-                const check = setInterval(() => {
-                    if (typeof Tesseract !== 'undefined') {
-                        clearInterval(check);
-                        resolve();
-                    }
-                }, 200);
-                // Timeout after 30s
-                setTimeout(() => { clearInterval(check); reject(new Error('Tesseract-Timeout')); }, 30000);
-                return;
-            }
-            const sc = document.createElement('script');
-            sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-            sc.dataset.icTesseract = '1';
-            sc.onload = () => {
-                const check = setInterval(() => {
-                    if (typeof Tesseract !== 'undefined') {
-                        clearInterval(check);
-                        resolve();
-                    }
-                }, 100);
-                setTimeout(() => { clearInterval(check); reject(new Error('Tesseract-Timeout')); }, 15000);
-            };
-            sc.onerror = () => reject(new Error('Tesseract konnte nicht geladen werden.'));
-            document.head.appendChild(sc);
-        });
+          }
+          blockStart = -1;
+        }
+      }
+    }
+    // Letzten Block prüfen
+    if (blockStart !== -1) {
+      const blockH = h - blockStart;
+      if (blockH >= h * MIN_BLOCK_HEIGHT) {
+        let totalDensity = 0;
+        for (let i = blockStart; i < h; i++) totalDensity += rowDensity[i];
+        const score = blockH * (totalDensity / blockH);
+        if (score > bestScore) {
+          bestStart = blockStart;
+          bestEnd = h;
+        }
+      }
     }
 
-    /* ─── IMAGE PREPROCESSING ────────────────── */
-    function preprocessImage(imgEl) {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-
-        // Scale down large images for faster OCR
-        const MAX_DIM = 1200;
-        let w = imgEl.naturalWidth || imgEl.width;
-        let h = imgEl.naturalHeight || imgEl.height;
-        if (w > MAX_DIM || h > MAX_DIM) {
-            const scale = MAX_DIM / Math.max(w, h);
-            w = Math.round(w * scale);
-            h = Math.round(h * scale);
-        }
-
-        canvas.width = w;
-        canvas.height = h;
-        ctx.drawImage(imgEl, 0, 0, w, h);
-
-        // Get pixel data
-        const imageData = ctx.getImageData(0, 0, w, h);
-        const data = imageData.data;
-
-        // Step 1: Convert to grayscale
-        for (let i = 0; i < data.length; i += 4) {
-            const gray = Math.round(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-            data[i] = gray;
-            data[i + 1] = gray;
-            data[i + 2] = gray;
-        }
-
-        // Step 2: Enhance contrast (histogram stretch)
-        let minVal = 255, maxVal = 0;
-        for (let i = 0; i < data.length; i += 4) {
-            if (data[i] < minVal) minVal = data[i];
-            if (data[i] > maxVal) maxVal = data[i];
-        }
-        const range = maxVal - minVal || 1;
-        for (let i = 0; i < data.length; i += 4) {
-            const stretched = Math.round(((data[i] - minVal) / range) * 255);
-            data[i] = stretched;
-            data[i + 1] = stretched;
-            data[i + 2] = stretched;
-        }
-
-        // Step 3: Adaptive thresholding (Otsu's method simplified)
-        // Calculate histogram
-        const hist = new Array(256).fill(0);
-        for (let i = 0; i < data.length; i += 4) {
-            hist[data[i]]++;
-        }
-        const totalPixels = data.length / 4;
-
-        // Find optimal threshold via Otsu
-        let sumTotal = 0;
-        for (let i = 0; i < 256; i++) sumTotal += i * hist[i];
-
-        let sumBg = 0, wBg = 0, wFg = 0;
-        let bestVar = 0, bestThresh = 128;
-
-        for (let t = 0; t < 256; t++) {
-            wBg += hist[t];
-            if (wBg === 0) continue;
-            wFg = totalPixels - wBg;
-            if (wFg === 0) break;
-
-            sumBg += t * hist[t];
-            const meanBg = sumBg / wBg;
-            const meanFg = (sumTotal - sumBg) / wFg;
-            const variance = wBg * wFg * (meanBg - meanFg) * (meanBg - meanFg);
-
-            if (variance > bestVar) {
-                bestVar = variance;
-                bestThresh = t;
-            }
-        }
-
-        // Apply threshold
-        for (let i = 0; i < data.length; i += 4) {
-            const val = data[i] > bestThresh ? 255 : 0;
-            data[i] = val;
-            data[i + 1] = val;
-            data[i + 2] = val;
-        }
-
-        ctx.putImageData(imageData, 0, 0);
-        return canvas.toDataURL('image/png');
+    // Nur croppen wenn ROI deutlich kleiner als Gesamtbild
+    const roiH = bestEnd - bestStart;
+    if (roiH < h * 0.8 && roiH > h * MIN_BLOCK_HEIGHT) {
+      // 10% Padding hinzufügen
+      const pad = Math.round(roiH * 0.1);
+      return {
+        x: 0,
+        y: Math.max(0, bestStart - pad),
+        w: w,
+        h: Math.min(h, roiH + 2 * pad)
+      };
     }
 
-    /* ─── SCORE PARSING ──────────────────────── */
-    function parseShootingScore(rawText) {
-        if (!rawText || typeof rawText !== 'string') return null;
+    return null; // Kein sinnvoller ROI gefunden
+  }
 
-        // Clean up OCR artifacts
-        const text = rawText
-            .replace(/[oO]/g, '0')    // Common OCR: o→0
-            .replace(/[lI|]/g, '1')   // Common OCR: l,I,|→1
-            .replace(/[sS](?=\d)/g, '5') // S before digit → 5
-            .replace(/[,]/g, '.')     // Comma → decimal point
-            .replace(/\s+/g, ' ');
+  /* ═══ 6. OCR-CACHE ═══════════════════════════════════════════════════ */
 
-        const scores = [];
+  /** Cache-Key aus File-Metadaten generieren */
+  function getCacheKey(file) {
+    return `${file.name}_${file.size}_${file.lastModified}`;
+  }
 
-        // Pattern 1: Decimal scores like "405.2", "392.5", "10.5"
-        const decRegex = /(\d{2,3})[.,](\d)\b/g;
-        let m;
-        while ((m = decRegex.exec(text)) !== null) {
-            const val = parseFloat(m[1] + '.' + m[2]);
-            if (val >= 10 && val <= 660) {
-                scores.push({ value: val, type: 'decimal', confidence: 0.9 });
-            }
+  /* ─── TESSERACT.JS LAZY LOADING ──────────── */
+  function ensureTesseract() {
+    return new Promise((resolve, reject) => {
+      if (typeof Tesseract !== 'undefined') {
+        resolve();
+        return;
+      }
+      // Check if script is already loading
+      if (document.querySelector('script[data-ic-tesseract]')) {
+        const check = setInterval(() => {
+          if (typeof Tesseract !== 'undefined') {
+            clearInterval(check);
+            resolve();
+          }
+        }, 200);
+        // Timeout after 30s
+        setTimeout(() => { clearInterval(check); reject(new Error('Tesseract-Timeout')); }, 30000);
+        return;
+      }
+      const sc = document.createElement('script');
+      sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+      sc.dataset.icTesseract = '1';
+      sc.onload = () => {
+        const check = setInterval(() => {
+          if (typeof Tesseract !== 'undefined') {
+            clearInterval(check);
+            resolve();
+          }
+        }, 100);
+        setTimeout(() => { clearInterval(check); reject(new Error('Tesseract-Timeout')); }, 15000);
+      };
+      sc.onerror = () => reject(new Error('Tesseract konnte nicht geladen werden.'));
+      document.head.appendChild(sc);
+    });
+  }
+
+  /* ═══ 2. PREPROCESSING — Modulare Bild-Pipeline (Web Worker Variante) ═════ */
+
+  let _prepWorker = null;
+  let _prepCallbacks = {};
+  let _prepMsgId = 0;
+
+  function getPrepWorker() {
+    if (_prepWorker) return _prepWorker;
+    const workerCode = `
+      function toGrayscale(d) {
+        for (let i = 0; i < d.length; i += 4) {
+          const gray = Math.round(d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114);
+          d[i] = d[i+1] = d[i+2] = gray;
         }
-
-        // Pattern 2: Whole numbers (typical for KK or total scores)
-        const intRegex = /\b(\d{2,3})\b/g;
-        while ((m = intRegex.exec(text)) !== null) {
-            const val = parseInt(m[1], 10);
-            // Filter for plausible shooting scores
-            if (val >= 50 && val <= 600) {
-                // Check it's not already captured as part of a decimal
-                const alreadyCaptured = scores.some(s =>
-                    Math.abs(s.value - val) < 1 || Math.abs(Math.floor(s.value) - val) === 0
-                );
-                if (!alreadyCaptured) {
-                    scores.push({ value: val, type: 'integer', confidence: 0.7 });
+      }
+      function applyGamma(d, gamma) {
+        if (!gamma || gamma === 1.0) return;
+        const inv = 1 / gamma;
+        for (let i = 0; i < d.length; i += 4) {
+          const corrected = Math.round(255 * Math.pow(d[i] / 255, inv));
+          d[i] = d[i+1] = d[i+2] = corrected;
+        }
+      }
+      function sharpen(d, w, h) {
+        const out = new Uint8ClampedArray(d.length);
+        for (let y = 1; y < h - 1; y++) {
+          for (let x = 1; x < w - 1; x++) {
+            const i = (y * w + x) * 4;
+            const val = Math.max(0, Math.min(255,
+              5 * d[i] - d[((y - 1) * w + x) * 4] - d[((y + 1) * w + x) * 4] - d[(y * w + x - 1) * 4] - d[(y * w + x + 1) * 4]
+            ));
+            out[i] = out[i+1] = out[i+2] = val;
+            out[i+3] = 255;
+          }
+        }
+        for (let y = 1; y < h - 1; y++) {
+          for (let x = 1; x < w - 1; x++) {
+            const i = (y * w + x) * 4;
+            d[i] = out[i]; d[i+1] = out[i+1]; d[i+2] = out[i+2];
+          }
+        }
+      }
+      function stretchContrast(d) {
+        let lo = 255, hi = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          if (d[i] < lo) lo = d[i];
+          if (d[i] > hi) hi = d[i];
+        }
+        const range = hi - lo || 1;
+        for (let i = 0; i < d.length; i += 4) {
+          const v = Math.round(((d[i] - lo) / range) * 255);
+          d[i] = d[i+1] = d[i+2] = v;
+        }
+      }
+      function invert(d) {
+        for (let i = 0; i < d.length; i += 4) {
+          d[i] = 255 - d[i]; d[i+1] = 255 - d[i+1]; d[i+2] = 255 - d[i+2];
+        }
+      }
+      function adaptiveThreshold(d, w, h, windowRatio = 8, sensitivity = 0.15) {
+        const S = Math.max(1, Math.round(w / windowRatio));
+        const intImg = new Uint32Array(w * h);
+        for (let x = 0; x < w; x++) {
+          let sum = 0;
+          for (let y = 0; y < h; y++) {
+            const idx = y * w + x;
+            sum += d[idx * 4];
+            intImg[idx] = (x === 0) ? sum : intImg[idx - 1] + sum;
+          }
+        }
+        for (let x = 0; x < w; x++) {
+          for (let y = 0; y < h; y++) {
+            const x1 = Math.max(x - S, 0), x2 = Math.min(x + S, w - 1);
+            const y1 = Math.max(y - S, 0), y2 = Math.min(y + S, h - 1);
+            const count = (x2 - x1 + 1) * (y2 - y1 + 1);
+            const a = (y1 > 0 && x1 > 0) ? intImg[(y1 - 1) * w + (x1 - 1)] : 0;
+            const b = (y1 > 0) ? intImg[(y1 - 1) * w + x2] : 0;
+            const c = (x1 > 0) ? intImg[y2 * w + (x1 - 1)] : 0;
+            const sum = intImg[y2 * w + x2] - b - c + a;
+            const idx = (y * w + x) * 4;
+            const val = (d[idx] * count <= sum * (1.0 - sensitivity)) ? 0 : 255;
+            d[idx] = d[idx+1] = d[idx+2] = val;
+          }
+        }
+      }
+      function removeNoise(d, w, h, minNeighbors = 2) {
+        const remove = [];
+        for (let y = 1; y < h - 1; y++) {
+          for (let x = 1; x < w - 1; x++) {
+            const idx = (y * w + x) * 4;
+            if (d[idx] === 0) {
+              let neighbors = 0;
+              for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                  if (dx === 0 && dy === 0) continue;
+                  if (d[((y + dy) * w + (x + dx)) * 4] === 0) neighbors++;
                 }
+              }
+              if (neighbors < minNeighbors) remove.push(idx);
             }
+          }
         }
-
-        // Pattern 3: Scores with "Ringe" / "Pkt" / "Punkte" label
-        const labelRegex = /(\d{2,3}(?:[.,]\d)?)\s*(?:Ringe|Pkt|Punkte|Treffer|rings?|pts?|points?)/gi;
-        while ((m = labelRegex.exec(text)) !== null) {
-            const val = parseFloat(m[1].replace(',', '.'));
-            if (val >= 10 && val <= 660) {
-                // High confidence score since it has a label
-                scores.push({ value: val, type: 'labeled', confidence: 0.95 });
-            }
+        for (let i = 0; i < remove.length; i++) {
+          const idx = remove[i];
+          d[idx] = d[idx+1] = d[idx+2] = 255;
         }
+      }
 
-        // Pattern 4: "Ergebnis" / "Gesamt" / "Total" followed by number
-        const totalRegex = /(?:ergebnis|gesamt|total|summe|result)[:\s]*(\d{2,3}(?:[.,]\d)?)/gi;
-        while ((m = totalRegex.exec(text)) !== null) {
-            const val = parseFloat(m[1].replace(',', '.'));
-            if (val >= 50 && val <= 660) {
-                scores.push({ value: val, type: 'total', confidence: 0.95 });
-            }
+      self.onmessage = function(e) {
+        const { id, imageData, w, h, options } = e.data;
+        try {
+          const d = imageData.data;
+          toGrayscale(d);
+          applyGamma(d, options.gamma);
+          sharpen(d, w, h);
+          stretchContrast(d);
+          if (options.invert) invert(d);
+          adaptiveThreshold(d, w, h);
+          removeNoise(d, w, h);
+          self.postMessage({ id, imageData }, [imageData.data.buffer]);
+        } catch (err) {
+          self.postMessage({ id, error: err.message });
         }
+      };
+    `;
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    _prepWorker = new Worker(URL.createObjectURL(blob));
+    _prepWorker.onmessage = function (e) {
+      const { id, imageData, error } = e.data;
+      if (_prepCallbacks[id]) {
+        if (error) _prepCallbacks[id].reject(new Error(error));
+        else _prepCallbacks[id].resolve(imageData);
+        delete _prepCallbacks[id];
+      }
+    };
+    return _prepWorker;
+  }
 
-        if (scores.length === 0) return null;
+  function runPrepWorkerAsync(imageData, w, h, options) {
+    return new Promise((resolve, reject) => {
+      const worker = getPrepWorker();
+      const id = ++_prepMsgId;
+      _prepCallbacks[id] = { resolve, reject };
+      worker.postMessage({ id, imageData, w, h, options }, [imageData.data.buffer]);
+    });
+  }
 
-        // Sort by confidence, then by value (higher = more likely total score)
-        scores.sort((a, b) => {
-            if (b.confidence !== a.confidence) return b.confidence - a.confidence;
-            return b.value - a.value;
-        });
+  const PREPROCESS = {
+    MAX_DIM: 1200,
 
-        // Remove duplicates (values within 0.5 of each other)
-        const unique = [];
-        for (const s of scores) {
-            if (!unique.some(u => Math.abs(u.value - s.value) < 0.5)) {
-                unique.push(s);
-            }
-        }
+    prepareCanvas(imgEl, crop) {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      let sx = 0, sy = 0;
+      let srcW = imgEl.naturalWidth || imgEl.width;
+      let srcH = imgEl.naturalHeight || imgEl.height;
+      if (crop) { sx = crop.x; sy = crop.y; srcW = crop.w; srcH = crop.h; }
 
-        return {
-            bestMatch: unique[0],
-            alternatives: unique.slice(1, 4),
-            allScores: unique
-        };
+      let w = srcW, h = srcH;
+      if (w > this.MAX_DIM || h > this.MAX_DIM) {
+        const scale = this.MAX_DIM / Math.max(w, h);
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+      }
+      canvas.width = w;
+      canvas.height = h;
+      ctx.drawImage(imgEl, sx, sy, srcW, srcH, 0, 0, w, h);
+      return { canvas, ctx, w, h, imageData: ctx.getImageData(0, 0, w, h) };
+    },
+
+    async run(imgEl, options = {}) {
+      const { canvas, ctx, w, h, imageData } = this.prepareCanvas(imgEl, options.crop);
+
+      const processedImageData = await runPrepWorkerAsync(imageData, w, h, options);
+      ctx.putImageData(processedImageData, 0, 0);
+
+      const dataUrl = canvas.toDataURL('image/png');
+      canvas.width = 0;
+      canvas.height = 0;
+
+      return { dataUrl, width: w, height: h, imageData: processedImageData };
+    },
+  };
+
+  /* ═══ 4. SCORE-PARSING — Regelbasierte Punktzahl-Extraktion ═════════ */
+
+  /**
+   * Berechnet die gewichtete Konfidenz eines einzelnen Score-Kandidaten.
+   * Nutzt räumliche Lage, Keyword-Nähe, Typ und Geometrie.
+   */
+  function calculateCandidateWeight(valStr, bbox, type, isKK, canvasW, canvasH, cleanText) {
+    const W = SCORE_CONFIG.WEIGHTS;
+    let weight = 1.0;
+
+    // 1. Räumliche Gewichtung: Bonus für Nähe zur Bildmitte
+    if (bbox && canvasW && canvasH) {
+      const cx = canvasW / 2, cy = canvasH / 2;
+      const wordCx = bbox.x0 + (bbox.x1 - bbox.x0) / 2;
+      const wordCy = bbox.y0 + (bbox.y1 - bbox.y0) / 2;
+      const dist = Math.hypot(wordCx - cx, wordCy - cy);
+      const maxDist = Math.hypot(cx, cy);
+      weight += (1 - dist / maxDist) * W.CENTER_FACTOR;
     }
 
-    /* ─── UI RENDERING ───────────────────────── */
+    // 2. Keyword-Nähe: Bonus wenn ein Schlüsselwort in der Nähe steht
+    const textLower = cleanText.toLowerCase();
+    for (const kw of SCORE_CONFIG.KEYWORDS) {
+      const kwIdx = textLower.indexOf(kw);
+      if (kwIdx === -1) continue;
+      const valIdx = cleanText.indexOf(valStr);
+      if (Math.abs(kwIdx - valIdx) < W.KEYWORD_MAX_DIST) {
+        weight += W.KEYWORD_NEAR_BONUS;
+        break; // Nur einmal bonussen
+      }
+    }
 
-    // Build the upload overlay
-    function createOverlay(botScore, isKK) {
-        // Remove existing overlay
-        const existing = document.getElementById('icOverlay');
-        if (existing) existing.remove();
+    // 3. Typ-Gewichtung
+    if (type === 'labeled' || type === 'total') weight += W.LABELED_TYPE_BONUS;
+    if (isKK && !valStr.includes('.')) weight += W.FORMAT_MATCH_BONUS;
+    if (!isKK && valStr.includes('.')) weight += W.FORMAT_MATCH_BONUS;
 
-        const overlay = document.createElement('div');
-        overlay.className = 'ic-overlay';
-        overlay.id = 'icOverlay';
+    return weight;
+  }
 
-        overlay.innerHTML = `
+  /**
+   * Prüft das Seitenverhältnis einer erkannten Bounding Box.
+   * Ziffern haben typischerweise ein Höhe/Breite-Verhältnis von 1.2–2.8.
+   */
+  function calculateGeometryWeight(bbox) {
+    if (!bbox) return 1.0;
+    const G = SCORE_CONFIG.GEOMETRY;
+    const ratio = (bbox.y1 - bbox.y0) / Math.max(1, bbox.x1 - bbox.x0);
+    if (ratio < G.MIN || ratio > G.MAX) return SCORE_CONFIG.WEIGHTS.BAD_GEOMETRY_PENALTY;
+    if (ratio > G.GOOD_MIN && ratio < G.GOOD_MAX) return SCORE_CONFIG.WEIGHTS.GOOD_GEOMETRY_BONUS;
+    return 1.0;
+  }
+
+  /**
+   * Extrahiert Punktzahl-Kandidaten aus OCR-Ergebnis.
+   * Nutzt Word-Level-Daten für exakte Bounding Boxes und Konfidenz.
+   * @returns {{ bestMatch, alternatives, allScores } | null}
+   */
+  function parseShootingScore(ocrResult, isKK, canvasW, canvasH) {
+    if (!ocrResult?.data?.text) return null;
+
+    const cleanText = cleanOCRText(ocrResult.data.text);
+    const words = ocrResult.data.words || [];
+    const { min, max } = SCORE_CONFIG.VALID_RANGE;
+    const candidates = [];
+
+    // Quelle 1: Individuelle Wörter mit Bounding-Box-Daten
+    for (const word of words) {
+      const cleaned = cleanOCRText(word.text);
+      const val = parseFloat(cleaned);
+      if (isNaN(val) || val < min || val > max) continue;
+
+      const type = cleaned.includes('.') ? 'decimal' : 'integer';
+      const geoWeight = calculateGeometryWeight(word.bbox);
+      const ctxWeight = calculateCandidateWeight(word.text, word.bbox, type, isKK, canvasW, canvasH, cleanText);
+      const confidence = (word.confidence / 100) * ctxWeight * geoWeight;
+
+      candidates.push({ value: val, type, confidence, bbox: word.bbox });
+    }
+
+    // Quelle 2: Regex-Suche nach Dezimalzahlen im Gesamttext (Fallback)
+    const decRegex = /(\d{2,3})[.,](\d)\b/g;
+    let m;
+    while ((m = decRegex.exec(cleanText)) !== null) {
+      const val = parseFloat(m[1] + '.' + m[2]);
+      if (val < min || val > max) continue;
+      const weight = calculateCandidateWeight(m[0], null, 'decimal', isKK, canvasW, canvasH, cleanText);
+      candidates.push({ value: val, type: 'decimal', confidence: 0.8 * weight });
+    }
+
+    if (candidates.length === 0) return null;
+
+    // Sortieren nach Konfidenz (höchste zuerst)
+    candidates.sort((a, b) => b.confidence - a.confidence);
+
+    // Deduplizierung: Werte die ≤0.1 voneinander abweichen zusammenfassen
+    const unique = [];
+    for (const c of candidates) {
+      if (!unique.some(u => Math.abs(u.value - c.value) < 0.1)) {
+        unique.push(c);
+      }
+    }
+
+    return { bestMatch: unique[0], alternatives: unique.slice(1, 4), allScores: unique };
+  }
+
+  /* ═══ 5. UI-RENDERING ══════════════════════════════════════════════ */
+
+  // Build the upload overlay
+  function createOverlay(botScore, isKK) {
+    // Remove existing overlay
+    const existing = document.getElementById('icOverlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'ic-overlay';
+    overlay.id = 'icOverlay';
+
+    overlay.innerHTML = `
       <div class="ic-sheet">
         <div class="ic-handle"></div>
         <div class="ic-header">
@@ -815,313 +600,396 @@ window.ImageCompare = (function () {
       </div>
     `;
 
-        document.body.appendChild(overlay);
-        setupOverlayEvents(overlay, botScore, isKK);
-        return overlay;
+    document.body.appendChild(overlay);
+    setupOverlayEvents(overlay, botScore, isKK);
+    return overlay;
+  }
+
+  function setupOverlayEvents(overlay, botScore, isKK) {
+    const closeBtn = overlay.querySelector('#icClose');
+    const fileInput = overlay.querySelector('#icFileInput');
+    const uploadZone = overlay.querySelector('#icUploadZone');
+    const compareBtn = overlay.querySelector('#icCompareBtn');
+    const rawToggle = overlay.querySelector('#icRawToggle');
+    const rawText = overlay.querySelector('#icRawText');
+    const scoreInput = overlay.querySelector('#icScoreInput');
+
+    // Close
+    closeBtn.addEventListener('click', () => closeOverlay());
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeOverlay();
+    });
+
+    // File input
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) handleImageFile(file, overlay, botScore, isKK);
+    });
+
+    // Drag & drop
+    uploadZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      uploadZone.classList.add('dragover');
+    });
+    uploadZone.addEventListener('dragleave', () => {
+      uploadZone.classList.remove('dragover');
+    });
+    uploadZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      uploadZone.classList.remove('dragover');
+      const file = e.dataTransfer?.files[0];
+      if (file && file.type.startsWith('image/')) {
+        handleImageFile(file, overlay, botScore, isKK);
+      }
+    });
+
+    // Compare button
+    compareBtn.addEventListener('click', () => {
+      const val = parseFloat(scoreInput.value);
+      if (isNaN(val) || val < 0) {
+        scoreInput.style.borderColor = 'rgba(240,80,60,.6)';
+        setTimeout(() => { scoreInput.style.borderColor = ''; }, 1200);
+        return;
+      }
+      showComparison(overlay, val, botScore, isKK);
+    });
+
+    // Score input → enable compare button
+    scoreInput.addEventListener('input', () => {
+      const val = parseFloat(scoreInput.value);
+      compareBtn.disabled = isNaN(val) || val < 0;
+    });
+    // Enter key → compare
+    scoreInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') compareBtn.click();
+    });
+
+    // Raw OCR toggle
+    rawToggle.addEventListener('click', () => {
+      rawText.classList.toggle('visible');
+      rawToggle.textContent = rawText.classList.contains('visible')
+        ? '▼ OCR-Rohtext ausblenden'
+        : '▶ OCR-Rohtext anzeigen';
+    });
+
+    // Swipe-down to close
+    let startY = 0;
+    const sheet = overlay.querySelector('.ic-sheet');
+    sheet.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; }, { passive: true });
+    sheet.addEventListener('touchend', (e) => {
+      const dy = e.changedTouches[0].clientY - startY;
+      if (dy > 80) closeOverlay();
+    }, { passive: true });
+  }
+
+  function closeOverlay() {
+    const overlay = document.getElementById('icOverlay');
+    if (overlay) {
+      overlay.style.opacity = '0';
+      overlay.style.transition = 'opacity .2s';
+      setTimeout(() => overlay.remove(), 200);
     }
+    _isProcessing = false;
+  }
 
-    function setupOverlayEvents(overlay, botScore, isKK) {
-        const closeBtn = overlay.querySelector('#icClose');
-        const fileInput = overlay.querySelector('#icFileInput');
-        const uploadZone = overlay.querySelector('#icUploadZone');
-        const compareBtn = overlay.querySelector('#icCompareBtn');
-        const rawToggle = overlay.querySelector('#icRawToggle');
-        const rawText = overlay.querySelector('#icRawText');
-        const scoreInput = overlay.querySelector('#icScoreInput');
+  /* ─── IMAGE PROCESSING FLOW ─────────────── */
+  async function handleImageFile(file, overlay, botScore, isKK) {
+    if (_isProcessing) return;
+    _isProcessing = true;
 
-        // Close
-        closeBtn.addEventListener('click', () => closeOverlay());
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) closeOverlay();
-        });
+    // Improvement #6: OCR-Ergebnis-Cache
+    const cacheKey = getCacheKey(file);
+    const cachedResult = _ocrCache.get(cacheKey);
 
-        // File input
-        fileInput.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (file) handleImageFile(file, overlay, botScore, isKK);
-        });
+    const uploadZone = overlay.querySelector('#icUploadZone');
+    const progress = overlay.querySelector('#icProgress');
+    const progressFill = overlay.querySelector('#icProgressFill');
+    const progressStatus = overlay.querySelector('#icProgressStatus');
+    const resultCard = overlay.querySelector('#icResultCard');
+    const detectedValue = overlay.querySelector('#icDetectedValue');
+    const detectedLabel = overlay.querySelector('#icDetectedLabel');
+    const scoreInput = overlay.querySelector('#icScoreInput');
+    const compareBtn = overlay.querySelector('#icCompareBtn');
+    const rawText = overlay.querySelector('#icRawText');
 
-        // Drag & drop
-        uploadZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            uploadZone.classList.add('dragover');
-        });
-        uploadZone.addEventListener('dragleave', () => {
-            uploadZone.classList.remove('dragover');
-        });
-        uploadZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            uploadZone.classList.remove('dragover');
-            const file = e.dataTransfer?.files[0];
-            if (file && file.type.startsWith('image/')) {
-                handleImageFile(file, overlay, botScore, isKK);
-            }
-        });
+    const objectUrl = URL.createObjectURL(file);
 
-        // Compare button
-        compareBtn.addEventListener('click', () => {
-            const val = parseFloat(scoreInput.value);
-            if (isNaN(val) || val < 0) {
-                scoreInput.style.borderColor = 'rgba(240,80,60,.6)';
-                setTimeout(() => { scoreInput.style.borderColor = ''; }, 1200);
-                return;
-            }
-            showComparison(overlay, val, botScore, isKK);
-        });
-
-        // Score input → enable compare button
-        scoreInput.addEventListener('input', () => {
-            const val = parseFloat(scoreInput.value);
-            compareBtn.disabled = isNaN(val) || val < 0;
-        });
-        // Enter key → compare
-        scoreInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') compareBtn.click();
-        });
-
-        // Raw OCR toggle
-        rawToggle.addEventListener('click', () => {
-            rawText.classList.toggle('visible');
-            rawToggle.textContent = rawText.classList.contains('visible')
-                ? '▼ OCR-Rohtext ausblenden'
-                : '▶ OCR-Rohtext anzeigen';
-        });
-
-        // Swipe-down to close
-        let startY = 0;
-        const sheet = overlay.querySelector('.ic-sheet');
-        sheet.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; }, { passive: true });
-        sheet.addEventListener('touchend', (e) => {
-            const dy = e.changedTouches[0].clientY - startY;
-            if (dy > 80) closeOverlay();
-        }, { passive: true });
-    }
-
-    function closeOverlay() {
-        const overlay = document.getElementById('icOverlay');
-        if (overlay) {
-            overlay.style.opacity = '0';
-            overlay.style.transition = 'opacity .2s';
-            setTimeout(() => overlay.remove(), 200);
-        }
+    uploadZone.classList.add('has-image');
+    uploadZone.innerHTML = `
+      <div class="ic-preview-wrap">
+        <img class="ic-preview-img" src="${objectUrl}" alt="Upload" id="icPreviewImg">
+        <div class="ic-remove-img" id="icRemoveImg" title="Bild entfernen">✕</div>
+      </div>
+    `;
+    const removeBtn = overlay.querySelector('#icRemoveImg');
+    if (removeBtn) {
+      removeBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        URL.revokeObjectURL(objectUrl);
+        resetUploadZone(overlay, isKK);
         _isProcessing = false;
+      });
     }
 
-    /* ─── IMAGE PROCESSING FLOW ─────────────── */
-    async function handleImageFile(file, overlay, botScore, isKK) {
-        if (_isProcessing) return;
-        _isProcessing = true;
+    if (cachedResult) {
+      URL.revokeObjectURL(objectUrl);
+      renderOCRResult(cachedResult, cachedResult.rawText, overlay, isKK);
+      _isProcessing = false;
+      return;
+    }
 
-        const uploadZone = overlay.querySelector('#icUploadZone');
-        const progress = overlay.querySelector('#icProgress');
-        const progressFill = overlay.querySelector('#icProgressFill');
-        const progressStatus = overlay.querySelector('#icProgressStatus');
-        const resultCard = overlay.querySelector('#icResultCard');
-        const detectedValue = overlay.querySelector('#icDetectedValue');
-        const detectedLabel = overlay.querySelector('#icDetectedLabel');
-        const scoreInput = overlay.querySelector('#icScoreInput');
-        const compareBtn = overlay.querySelector('#icCompareBtn');
-        const rawText = overlay.querySelector('#icRawText');
+    progress.classList.add('active');
+    resultCard.classList.remove('active');
+    progressFill.style.width = '5%';
+    progressStatus.textContent = 'Bild wird vorbereitet…';
 
-        // Show image preview
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            uploadZone.classList.add('has-image');
-            uploadZone.innerHTML = `
-        <div class="ic-preview-wrap">
-          <img class="ic-preview-img" src="${e.target.result}" alt="Upload" id="icPreviewImg">
-          <div class="ic-remove-img" id="icRemoveImg" title="Bild entfernen">✕</div>
-        </div>
-      `;
-            const removeBtn = overlay.querySelector('#icRemoveImg');
-            if (removeBtn) {
-                removeBtn.addEventListener('click', (ev) => {
-                    ev.stopPropagation();
-                    resetUploadZone(overlay, isKK);
-                    _isProcessing = false;
-                });
-            }
-        };
-        reader.readAsDataURL(file);
+    try {
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = objectUrl;
+      });
 
-        // Show progress
-        progress.classList.add('active');
-        resultCard.classList.remove('active');
-        progressFill.style.width = '5%';
-        progressStatus.textContent = 'Bild wird vorbereitet…';
+      progressFill.style.width = '15%';
+      progressStatus.textContent = 'Lade Tesseract.js OCR-Engine…';
 
-        try {
-            // Wait for image to load
-            const img = new Image();
-            const imgUrl = URL.createObjectURL(file);
-            await new Promise((resolve, reject) => {
-                img.onload = resolve;
-                img.onerror = reject;
-                img.src = imgUrl;
-            });
+      _ocrProgressCallback = (prog) => {
+        const pct = Math.round(30 + prog * 50);
+        progressFill.style.width = pct + '%';
+        progressStatus.textContent = `Texterkennung… ${Math.round(prog * 100)}%`;
+      };
 
-            progressFill.style.width = '15%';
-            progressStatus.textContent = 'Bildvorverarbeitung (Kontrast, Threshold)…';
-            await delay(300);
+      const worker = await getWorker();
 
-            // Preprocess
-            const processedDataUrl = preprocessImage(img);
-            URL.revokeObjectURL(imgUrl);
+      progressFill.style.width = '25%';
+      progressStatus.textContent = 'Erkenne interessanten Bereich (ROI)…';
 
-            progressFill.style.width = '25%';
-            progressStatus.textContent = 'Lade Tesseract.js OCR-Engine…';
+      try {
+        let bestParsed = null;
+        let bestResult = null;
+        let bestConf = 0;
 
-            // Load Tesseract
-            await ensureTesseract();
+        // Improvement #3: ROI-Erkennung
+        const roiPrep = await PREPROCESS.run(img, { gamma: 1.0 });
+        const roiCanvas = document.createElement('canvas');
+        const roiCtx = roiCanvas.getContext('2d');
+        const roiImg = new Image();
+        roiImg.src = roiPrep.dataUrl;
+        await new Promise(r => { roiImg.onload = r; });
+        roiCanvas.width = roiPrep.width;
+        roiCanvas.height = roiPrep.height;
+        roiCtx.drawImage(roiImg, 0, 0);
+        const roiCrop = detectROI(roiCtx.getImageData(0, 0, roiPrep.width, roiPrep.height), roiPrep.width, roiPrep.height);
 
-            progressFill.style.width = '35%';
-            progressStatus.textContent = 'OCR-Engine wird initialisiert…';
-
-            // Create worker
-            const worker = await Tesseract.createWorker('deu+eng', 1, {
-                logger: (info) => {
-                    if (info.status === 'recognizing text') {
-                        const pct = Math.round(35 + info.progress * 55);
-                        progressFill.style.width = pct + '%';
-                        progressStatus.textContent = `Texterkennung… ${Math.round(info.progress * 100)}%`;
-                    }
-                }
-            });
-
-            progressFill.style.width = '40%';
-            progressStatus.textContent = 'Texterkennung läuft…';
-
-            // Recognize
-            const result = await worker.recognize(processedDataUrl);
-            const ocrText = result.data.text;
-
-            progressFill.style.width = '95%';
-            progressStatus.textContent = 'Ergebnis wird analysiert…';
-            await delay(200);
-
-            // Terminate worker to free memory
-            await worker.terminate();
-
-            // Parse scores
-            const parsed = parseShootingScore(ocrText);
-
-            progressFill.style.width = '100%';
-            progressStatus.textContent = '✓ Analyse abgeschlossen';
-
-            // Show raw OCR text
-            rawText.textContent = ocrText || '(kein Text erkannt)';
-
-            // Show result
-            await delay(400);
-            progress.classList.remove('active');
-            resultCard.classList.add('active');
-
-            if (parsed && parsed.bestMatch) {
-                const best = parsed.bestMatch;
-                const displayVal = isKK ? Math.floor(best.value) : best.value.toFixed(1);
-                detectedValue.textContent = displayVal;
-                detectedLabel.textContent = `Typ: ${best.type === 'labeled' || best.type === 'total' ? 'Beschrifteter Wert' : best.type === 'decimal' ? 'Dezimalzahl' : 'Ganzzahl'} · Konfidenz: ${Math.round(best.confidence * 100)}%`;
-                scoreInput.value = displayVal;
-                compareBtn.disabled = false;
-
-                // Show alternatives if any
-                if (parsed.alternatives.length > 0) {
-                    detectedLabel.textContent += ` · ${parsed.alternatives.length} Alternative(n)`;
-                }
-            } else {
-                detectedValue.textContent = '?';
-                detectedLabel.textContent = 'Keine Punktzahl erkannt – bitte manuell eingeben';
-                scoreInput.value = '';
-                scoreInput.focus();
-                compareBtn.disabled = true;
-            }
-
-        } catch (err) {
-            console.error('ImageCompare OCR error:', err);
-            progressFill.style.width = '100%';
-            progressFill.style.background = 'linear-gradient(90deg, #d04030, #f08070)';
-            progressStatus.textContent = '⚠ Fehler: ' + (err.message || 'OCR fehlgeschlagen');
-
-            await delay(1500);
-            progress.classList.remove('active');
-            resultCard.classList.add('active');
-            detectedValue.textContent = '?';
-            detectedLabel.textContent = 'OCR fehlgeschlagen – bitte Ergebnis manuell eingeben';
-            scoreInput.value = '';
-            scoreInput.focus();
+        let crop = null;
+        if (roiCrop) {
+          const scaleX = (img.naturalWidth || img.width) / roiPrep.width;
+          const scaleY = (img.naturalHeight || img.height) / roiPrep.height;
+          crop = {
+            x: roiCrop.x * scaleX,
+            y: roiCrop.y * scaleY,
+            w: roiCrop.w * scaleX,
+            h: roiCrop.h * scaleY
+          };
         }
 
-        _isProcessing = false;
+        for (let i = 0; i < OCR_PASSES.length; i++) {
+          const pass = OCR_PASSES[i];
+          if (bestConf >= pass.triggerBelow) continue;
+
+          progressStatus.textContent = `Analysiere Bild (${pass.name}, Pass ${i + 1}/${OCR_PASSES.length})…`;
+          progressFill.style.width = Math.round(30 + (i / OCR_PASSES.length) * 60) + '%';
+
+          const prepOptions = { ...pass.options, crop };
+          const prep = await PREPROCESS.run(img, prepOptions);
+          const result = await worker.recognize(prep.dataUrl);
+          const parsed = parseShootingScore(result, isKK, prep.width, prep.height);
+
+          if (parsed?.bestMatch && parsed.bestMatch.confidence > bestConf) {
+            bestParsed = parsed;
+            bestResult = result;
+            bestConf = parsed.bestMatch.confidence;
+          }
+        }
+
+        URL.revokeObjectURL(objectUrl);
+
+        progressFill.style.width = '95%';
+        progressStatus.textContent = 'Ergebnis wird finalisiert…';
+        await delay(200);
+
+        progressFill.style.width = '100%';
+        progressStatus.textContent = '✓ Analyse abgeschlossen';
+
+        const rawTextStr = bestResult?.data?.text || '(kein Text erkannt)';
+        bestParsed = bestParsed || {};
+        bestParsed.rawText = rawTextStr;
+
+        if (bestParsed && bestParsed.bestMatch) {
+          _ocrCache.set(cacheKey, bestParsed);
+          if (_ocrCache.size > OCR_CACHE_MAX) {
+            const firstKey = _ocrCache.keys().next().value;
+            _ocrCache.delete(firstKey);
+          }
+        }
+
+        renderOCRResult(bestParsed, rawTextStr, overlay, isKK);
+
+        // Worker remains persistent (Improvement #2)
+
+      } catch (innerErr) {
+        throw innerErr;
+      }
+
+    } catch (err) {
+      console.error('ImageCompare OCR error:', err);
+      progressFill.style.width = '100%';
+      progressFill.style.background = 'linear-gradient(90deg, #d04030, #f08070)';
+      progressStatus.textContent = '⚠ Fehler: ' + (err.message || 'OCR fehlgeschlagen');
+
+      await delay(1500);
+      progress.classList.remove('active');
+      resultCard.classList.add('active');
+      detectedValue.textContent = '?';
+      detectedLabel.textContent = 'OCR fehlgeschlagen – bitte Ergebnis manuell eingeben';
+      scoreInput.value = '';
+      scoreInput.focus();
     }
 
-    function resetUploadZone(overlay, isKK) {
-        const uploadZone = overlay.querySelector('#icUploadZone');
-        const progress = overlay.querySelector('#icProgress');
-        const resultCard = overlay.querySelector('#icResultCard');
-        const comparison = overlay.querySelector('#icComparison');
-        const compareBtn = overlay.querySelector('#icCompareBtn');
+    _isProcessing = false;
+  }
 
-        uploadZone.classList.remove('has-image');
-        uploadZone.innerHTML = `
+  function renderOCRResult(bestParsed, rawTextStr, overlay, isKK) {
+    const progress = overlay.querySelector('#icProgress');
+    const resultCard = overlay.querySelector('#icResultCard');
+    const detectedValue = overlay.querySelector('#icDetectedValue');
+    const detectedLabel = overlay.querySelector('#icDetectedLabel');
+    const scoreInput = overlay.querySelector('#icScoreInput');
+    const compareBtn = overlay.querySelector('#icCompareBtn');
+    const rawText = overlay.querySelector('#icRawText');
+
+    rawText.textContent = rawTextStr;
+
+    progress.classList.remove('active');
+    resultCard.classList.add('active');
+
+    let exAlt = overlay.querySelector('.ic-alt-chips');
+    if (exAlt) exAlt.remove();
+
+    if (bestParsed?.bestMatch) {
+      const best = bestParsed.bestMatch;
+      const displayVal = isKK ? Math.floor(best.value) : best.value.toFixed(1);
+      detectedValue.textContent = displayVal;
+      const typeLabel = (best.type === 'decimal') ? 'Dezimalzahl' : 'Ganzzahl';
+      detectedLabel.innerHTML = `Typ: ${typeLabel} · Konfidenz: ${Math.round(best.confidence * 100)}%`;
+      scoreInput.value = displayVal;
+      compareBtn.disabled = false;
+
+      // Improvement #4: Alternative-Chips
+      if (bestParsed.alternatives && bestParsed.alternatives.length > 0) {
+        const altContainer = document.createElement('div');
+        altContainer.className = 'ic-alt-chips';
+
+        const lbl = document.createElement('div');
+        lbl.className = 'ic-alt-label';
+        lbl.textContent = 'Alternativen:';
+        lbl.style.width = '100%';
+        altContainer.appendChild(lbl);
+
+        bestParsed.alternatives.forEach((alt) => {
+          const altVal = isKK ? Math.floor(alt.value) : alt.value.toFixed(1);
+          const btn = document.createElement('button');
+          btn.className = 'ic-alt-chip';
+          btn.textContent = altVal;
+          btn.addEventListener('click', () => {
+            scoreInput.value = altVal;
+            detectedValue.textContent = altVal;
+            compareBtn.disabled = false;
+          });
+          altContainer.appendChild(btn);
+        });
+
+        const editHint = overlay.querySelector('.ic-edit-hint');
+        editHint.parentNode.insertBefore(altContainer, editHint);
+      }
+    } else {
+      detectedValue.textContent = '?';
+      detectedLabel.innerHTML = 'Keine Punktzahl erkannt – bitte manuell eingeben';
+      scoreInput.value = '';
+      scoreInput.focus();
+      compareBtn.disabled = true;
+    }
+  }
+
+  function resetUploadZone(overlay, isKK) {
+    const uploadZone = overlay.querySelector('#icUploadZone');
+    const progress = overlay.querySelector('#icProgress');
+    const resultCard = overlay.querySelector('#icResultCard');
+    const comparison = overlay.querySelector('#icComparison');
+    const compareBtn = overlay.querySelector('#icCompareBtn');
+
+    uploadZone.classList.remove('has-image');
+    uploadZone.innerHTML = `
       <input type="file" class="ic-upload-input" id="icFileInput"
              accept="image/*" capture="environment">
       <span class="ic-upload-icon">📸</span>
       <div class="ic-upload-text">Foto der Ergebnisanzeige<br>hochladen oder aufnehmen</div>
       <div class="ic-upload-sub">JPG, PNG · Kamera oder Galerie</div>
     `;
-        progress.classList.remove('active');
-        resultCard.classList.remove('active');
-        comparison.classList.remove('active');
-        compareBtn.disabled = true;
+    progress.classList.remove('active');
+    resultCard.classList.remove('active');
+    comparison.classList.remove('active');
+    compareBtn.disabled = true;
 
-        // Re-attach file input listener
-        const newInput = overlay.querySelector('#icFileInput');
-        const botScore = parseFloat(overlay.dataset.botScore) || 0;
-        newInput.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (file) handleImageFile(file, overlay, botScore, isKK);
-        });
+    // Re-attach file input listener
+    const newInput = overlay.querySelector('#icFileInput');
+    const botScore = parseFloat(overlay.dataset.botScore) || 0;
+    newInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) handleImageFile(file, overlay, botScore, isKK);
+    });
+  }
+
+  /* ─── COMPARISON RESULT ─────────────────── */
+  function showComparison(overlay, playerScore, botScore, isKK) {
+    const comparison = overlay.querySelector('#icComparison');
+    if (!comparison) return;
+
+    const diff = playerScore - botScore;
+    const absDiff = Math.abs(diff);
+    let resultClass, resultEmoji, resultText, diffText;
+
+    if (diff > 0.05) {
+      resultClass = 'win';
+      resultEmoji = '🏆';
+      resultText = 'DU GEWINNST!';
+      diffText = isKK
+        ? `+${Math.round(absDiff)} Ringe Vorsprung`
+        : `+${absDiff.toFixed(1)} Punkte Vorsprung`;
+    } else if (diff < -0.05) {
+      resultClass = 'lose';
+      resultEmoji = '😔';
+      resultText = 'BOT GEWINNT';
+      diffText = isKK
+        ? `−${Math.round(absDiff)} Ringe Rückstand`
+        : `−${absDiff.toFixed(1)} Punkte Rückstand`;
+    } else {
+      resultClass = 'draw';
+      resultEmoji = '🤝';
+      resultText = 'UNENTSCHIEDEN!';
+      diffText = 'Punktgleich!';
     }
 
-    /* ─── COMPARISON RESULT ─────────────────── */
-    function showComparison(overlay, playerScore, botScore, isKK) {
-        const comparison = overlay.querySelector('#icComparison');
-        if (!comparison) return;
+    // Calculate bar widths
+    const total = playerScore + botScore;
+    const playerPct = total > 0 ? Math.round((playerScore / total) * 100) : 50;
+    const botPct = 100 - playerPct;
 
-        const diff = playerScore - botScore;
-        const absDiff = Math.abs(diff);
-        let resultClass, resultEmoji, resultText, diffText;
+    const playerDisplay = isKK ? Math.floor(playerScore) : playerScore.toFixed(1);
+    const botDisplay = isKK ? Math.floor(botScore) : botScore.toFixed(1);
 
-        if (diff > 0.05) {
-            resultClass = 'win';
-            resultEmoji = '🏆';
-            resultText = 'DU GEWINNST!';
-            diffText = isKK
-                ? `+${Math.round(absDiff)} Ringe Vorsprung`
-                : `+${absDiff.toFixed(1)} Punkte Vorsprung`;
-        } else if (diff < -0.05) {
-            resultClass = 'lose';
-            resultEmoji = '😔';
-            resultText = 'BOT GEWINNT';
-            diffText = isKK
-                ? `−${Math.round(absDiff)} Ringe Rückstand`
-                : `−${absDiff.toFixed(1)} Punkte Rückstand`;
-        } else {
-            resultClass = 'draw';
-            resultEmoji = '🤝';
-            resultText = 'UNENTSCHIEDEN!';
-            diffText = 'Punktgleich!';
-        }
-
-        // Calculate bar widths
-        const total = playerScore + botScore;
-        const playerPct = total > 0 ? Math.round((playerScore / total) * 100) : 50;
-        const botPct = 100 - playerPct;
-
-        const playerDisplay = isKK ? Math.floor(playerScore) : playerScore.toFixed(1);
-        const botDisplay = isKK ? Math.floor(botScore) : botScore.toFixed(1);
-
-        comparison.innerHTML = `
+    comparison.innerHTML = `
       <div style="text-align:center;font-size:2rem;margin-bottom:-4px;">${resultEmoji}</div>
       <div class="ic-comp-title ${resultClass}">${resultText}</div>
       <div class="ic-comp-scores">
@@ -1147,103 +1015,103 @@ window.ImageCompare = (function () {
       </button>
     `;
 
-        comparison.classList.add('active');
+    comparison.classList.add('active');
 
-        // Scroll comparison into view
-        setTimeout(() => {
-            comparison.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }, 100);
+    // Scroll comparison into view
+    setTimeout(() => {
+      comparison.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 100);
 
-        // Submit Button Event
-        const submitBtn = comparison.querySelector('#icSubmitBtn');
-        submitBtn.addEventListener('click', () => {
-            closeOverlay();
+    // Submit Button Event
+    const submitBtn = comparison.querySelector('#icSubmitBtn');
+    submitBtn.addEventListener('click', () => {
+      closeOverlay();
 
-            // Get inputs directly from document to be safe
-            const playerInp = document.getElementById('playerInp');
-            const playerInpInt = document.getElementById('playerInpInt');
-            const calcFunc = window.calcResult || (typeof calcResult === 'function' ? calcResult : null);
+      // Get inputs directly from document to be safe
+      const playerInp = document.getElementById('playerInp');
+      const playerInpInt = document.getElementById('playerInpInt');
+      const calcFunc = window.calcResult || (typeof calcResult === 'function' ? calcResult : null);
 
-            if (playerInp || playerInpInt) {
-                if (isKK && playerInpInt) {
-                    playerInpInt.value = Math.floor(playerScore);
-                } else if (!isKK) {
-                    if (playerInp) playerInp.value = playerScore.toFixed(1);
-                    if (playerInpInt) playerInpInt.value = Math.floor(playerScore);
-                }
-
-                // Directly trigger the result calculation in index.html
-                if (typeof calcFunc === 'function') {
-                    calcFunc();
-                } else if (typeof window.showGameOver === 'function') {
-                    window.showGameOver(playerScore, botScore, null, Math.floor(playerScore));
-                }
-            }
-        });
-
-        // Play sound if available
-        if (typeof Sounds !== 'undefined') {
-            setTimeout(() => {
-                if (resultClass === 'win') Sounds.win();
-                else if (resultClass === 'lose') Sounds.lose();
-                else Sounds.draw();
-            }, 300);
+      if (playerInp || playerInpInt) {
+        if (isKK && playerInpInt) {
+          playerInpInt.value = Math.floor(playerScore);
+        } else if (!isKK) {
+          if (playerInp) playerInp.value = playerScore.toFixed(1);
+          if (playerInpInt) playerInpInt.value = Math.floor(playerScore);
         }
-        if (typeof Haptics !== 'undefined') {
-            setTimeout(() => {
-                if (resultClass === 'win') Haptics.win();
-                else if (resultClass === 'lose') Haptics.lose();
-                else Haptics.draw();
-            }, 300);
+
+        // Directly trigger the result calculation in index.html
+        if (typeof calcFunc === 'function') {
+          calcFunc();
+        } else if (typeof window.showGameOver === 'function') {
+          window.showGameOver(playerScore, botScore, null, Math.floor(playerScore));
         }
+      }
+    });
+
+    // Play sound if available
+    if (typeof Sounds !== 'undefined') {
+      setTimeout(() => {
+        if (resultClass === 'win') Sounds.win();
+        else if (resultClass === 'lose') Sounds.lose();
+        else Sounds.draw();
+      }, 300);
     }
-
-    /* ─── UTILITIES ──────────────────────────── */
-    function delay(ms) {
-        return new Promise(r => setTimeout(r, ms));
+    if (typeof Haptics !== 'undefined') {
+      setTimeout(() => {
+        if (resultClass === 'win') Haptics.win();
+        else if (resultClass === 'lose') Haptics.lose();
+        else Haptics.draw();
+      }, 300);
     }
+  }
 
-    /* ─── PUBLIC API ─────────────────────────── */
-    return {
-        /**
-         * Initialize: inject CSS styles
-         */
-        init() {
-            injectStyles();
-        },
+  /* ─── UTILITIES ──────────────────────────── */
+  function delay(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
 
-        /**
-         * Open the image upload & comparison overlay.
-         * @param {number} botScore - The bot's total score from the current game
-         * @param {boolean} isKK - Whether the current weapon is KK (integer scoring)
-         */
-        open(botScore, isKK) {
-            injectStyles();
-            const overlay = createOverlay(botScore || 0, !!isKK);
-            overlay.dataset.botScore = botScore || 0;
-        },
+  /* ─── PUBLIC API ─────────────────────────── */
+  return {
+    /**
+     * Initialize: inject CSS styles
+     */
+    init() {
+      injectStyles();
+    },
 
-        /**
-         * Create a small upload button for the game-over screen
-         * @param {HTMLElement} container - The DOM element to insert the button into
-         * @param {number} botScore - The bot's total score
-         * @param {boolean} isKK - Whether scoring is integer (KK)
-         */
-        createGameOverButton(container, botScore, isKK) {
-            if (!container) return;
-            injectStyles();
+    /**
+     * Open the image upload & comparison overlay.
+     * @param {number} botScore - The bot's total score from the current game
+     * @param {boolean} isKK - Whether the current weapon is KK (integer scoring)
+     */
+    open(botScore, isKK) {
+      injectStyles();
+      const overlay = createOverlay(botScore || 0, !!isKK);
+      overlay.dataset.botScore = botScore || 0;
+    },
 
-            // Don't add duplicate buttons
-            if (container.querySelector('.ic-go-upload-btn')) return;
+    /**
+     * Create a small upload button for the game-over screen
+     * @param {HTMLElement} container - The DOM element to insert the button into
+     * @param {number} botScore - The bot's total score
+     * @param {boolean} isKK - Whether scoring is integer (KK)
+     */
+    createGameOverButton(container, botScore, isKK) {
+      if (!container) return;
+      injectStyles();
 
-            const btn = document.createElement('button');
-            btn.className = 'ic-go-upload-btn';
-            btn.innerHTML = '<span class="ic-go-upload-ico">📷</span> Wettkampf-Foto vergleichen';
-            btn.addEventListener('click', () => {
-                ImageCompare.open(botScore, isKK);
-            });
+      // Don't add duplicate buttons
+      if (container.querySelector('.ic-go-upload-btn')) return;
 
-            container.appendChild(btn);
-        }
-    };
+      const btn = document.createElement('button');
+      btn.className = 'ic-go-upload-btn';
+      btn.innerHTML = '<span class="ic-go-upload-ico">📷</span> Wettkampf-Foto vergleichen';
+      btn.addEventListener('click', () => {
+        ImageCompare.open(botScore, isKK);
+      });
+
+      container.appendChild(btn);
+    }
+  };
 })();
