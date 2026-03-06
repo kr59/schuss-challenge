@@ -5,18 +5,11 @@
   z-index: 950;
   background: rgba(0,0,0,.7);
   backdrop-filter: blur(6px);
-  display: none;
+  display: flex;
   align-items: flex-end;
   justify-content: center;
-  animation: ic-fadeIn .2s ease;
-  pointer-events: none;
-  opacity: 0;
-}
-
-.ic-overlay.active {
-  display: flex;
-  pointer-events: auto;
-  opacity: 1;
+  transition: opacity .2s ease;
+  /* Hidden by default via inline style: opacity:0; pointer-events:none */
 }
 @keyframes ic-fadeIn {
   from { opacity: 0; }
@@ -334,7 +327,7 @@
   transition: transform .15s, box-shadow .15s;
 }
 .ic-compare-btn:hover {
-  transform: translateY(-1px);
+  opacity: 0.9;
   box-shadow: 0 6px 28px rgba(100,160,30,.35);
 }
 .ic-compare-btn:active {
@@ -507,12 +500,11 @@
   transition: all .2s;
 }
 .ic-submit-btn:hover {
-  background: linear-gradient(135deg, #8ecf40, #6ca024);
-  transform: translateY(-2px);
+  opacity: 0.9;
   box-shadow: 0 6px 20px rgba(120,180,40,.3);
 }
 .ic-submit-btn:active {
-  transform: translateY(1px);
+  opacity: 0.85;
 }
 
 /* Game Over Upload Button */

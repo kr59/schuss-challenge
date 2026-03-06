@@ -1,165 +1,17 @@
-/* ═══════════════════════════════════════════════════════════════════════
-   IMAGE-COMPARE.JS — KI-gestützte Bilderkennung & Ergebnis-Vergleich
-   100% kostenlos · Tesseract.js + TensorFlow.js · Läuft im Browser
-   ═══════════════════════════════════════════════════════════════════════
-   Architektur:
-     1. BRAIN-IMPORT     — Konfiguration aus image-compare-brain.js
-     2. TENSORFLOW.JS    — Monitor-Erkennung & Auto-Crop
-     3. PREPROCESSING    — Modulare Bild-Pipeline (Web Worker)
-     4. OCR-ENGINE       — Tesseract.js Lazy-Loading & Multi-Pass
-     5. SCORE-PARSING    — Regelbasierte Punktzahl-Extraktion
-     6. UI-RENDERING     — Overlay, Upload, Fortschritt, Vergleich
-     7. PUBLIC API       — init(), open(), createGameOverButton()
-   ═══════════════════════════════════════════════════════════════════════ */
-
-window.ImageCompare = (function () {
+﻿window.ImageCompare = (function () {
   'use strict';
 
-  /* ═══ 1. BRAIN-IMPORT ═══════════════════════════════════════════════
-     Alle Konstanten kommen aus image-compare-brain.js
-     (muss VOR diesem Script geladen werden)
-     ═══════════════════════════════════════════════════════════════════ */
-  const Brain = window.ImageCompareBrain;
-  if (!Brain) {
-    console.error('[ImageCompare] FEHLER: image-compare-brain.js muss VOR image-compare.js geladen werden!');
-  }
-  const SCORE_CONFIG = Brain ? Brain.SCORE_CONFIG : {};
-  const OCR_PASSES = Brain ? Brain.OCR_PASSES : [];
-  const cleanOCRText = Brain ? Brain.cleanOCRText : (t) => (t || '');
+  const Brain = window.ImageCompareBrain || null;
+  const SCORE_CONFIG = Brain && Brain.SCORE_CONFIG ? Brain.SCORE_CONFIG : null;
 
-  /* ─── PRIVATE STATE ──────────────────────── */
-  let _isProcessing = false;
-
-  /* ═══ 2. TENSORFLOW.JS — Monitor-Erkennung ═════════════════════════
-     Erkennt ob ein Foto einen Ergebnis-Monitor zeigt und liefert
-     optional eine Bounding Box für Auto-Crop.
-     ═══════════════════════════════════════════════════════════════════ */
-
-  let _tfModel = null;
-  let _tfLoadFailed = false;
-
-  /**
-   * Lädt TensorFlow.js on-demand per CDN.
-   * Wird nur aufgerufen wenn ein Modell konfiguriert ist.
-   */
-  function ensureTensorFlow() {
-    return new Promise((resolve, reject) => {
-      if (typeof tf !== 'undefined') { resolve(); return; }
-      if (document.querySelector('script[data-ic-tfjs]')) {
-        const check = setInterval(() => {
-          if (typeof tf !== 'undefined') { clearInterval(check); resolve(); }
-        }, 200);
-        setTimeout(() => { clearInterval(check); reject(new Error('TF.js-Timeout')); }, 30000);
-        return;
-      }
-      const sc = document.createElement('script');
-      sc.src = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js';
-      sc.dataset.icTfjs = '1';
-      sc.onload = () => {
-        const check = setInterval(() => {
-          if (typeof tf !== 'undefined') { clearInterval(check); resolve(); }
-        }, 100);
-        setTimeout(() => { clearInterval(check); reject(new Error('TF.js-Timeout')); }, 15000);
-      };
-      sc.onerror = () => reject(new Error('TensorFlow.js konnte nicht geladen werden.'));
-      document.head.appendChild(sc);
-    });
-  }
-
-  /**
-   * Lädt das benutzerdefinierte TF-Modell (einmalig, dann gecacht).
-   * ══════════════════════════════════════════════════════════════════
-   * ██  Der Modell-Pfad wird in image-compare-brain.js definiert:  ██
-   * ██  → Brain.MODEL_PATH (Standard: './model/model.json')       ██
-   * ══════════════════════════════════════════════════════════════════
-   */
-  async function loadTFModel() {
-    if (_tfModel) return _tfModel;
-    if (_tfLoadFailed) return null;
-    try {
-      await ensureTensorFlow();
-      // ── Speicher-Optimierung: WebGL-Backend bevorzugen ──
-      await tf.setBackend('webgl');
-      await tf.ready();
-      _tfModel = await tf.loadLayersModel(Brain.MODEL_PATH);
-      console.info('[ImageCompare] TF-Modell geladen:', Brain.MODEL_PATH);
-      return _tfModel;
-    } catch (err) {
-      _tfLoadFailed = true;
-      console.info('[ImageCompare] Monitor-Modell nicht gefunden, überspringe TF-Analyse.', err.message);
-      return null;
-    }
-  }
-
-  /**
-   * Prüft ob das Foto einen Ergebnis-Monitor zeigt.
-   * Nutzt tf.tidy() für automatisches Tensor-Cleanup → kein RAM-Leak!
-   *
-   * ═══════════════════════════════════════════════════════════════════
-   * Dein Teachable Machine Modell hat 2 Klassen:
-   *   Index 0 = "Monitor"  (Ergebnis-Anzeige erkannt)
-   *   Index 1 = "Nichts"   (kein Monitor)
-   * Ausgabe ist Softmax: [monitor_prob, nichts_prob]
-   * ═══════════════════════════════════════════════════════════════════
-   *
-   * @param {HTMLImageElement} imgEl — das hochgeladene Bild
-   * @returns {Promise<{isMonitor: boolean, confidence: number, boundingBox: object|null}>}
-   */
-  async function detectMonitor(imgEl) {
-    const model = await loadTFModel();
-    if (!model) {
-      // Kein Modell → Fallback: gehe davon aus, es IST ein Monitor
-      return { isMonitor: true, confidence: 0, boundingBox: null };
-    }
-
-    const inputSize = Brain.MODEL_INPUT_SIZE; // 224 (aus metadata.json)
-
-    // ── Speicher-optimiert: tf.tidy() räumt ALLE Zwischen-Tensoren auf ──
-    const prediction = tf.tidy(() => {
-      // Bild → Tensor (3 Kanäle, uint8)
-      const imgTensor = tf.browser.fromPixels(imgEl);
-      // Resize auf Modell-Eingabegröße (224×224)
-      const resized = tf.image.resizeBilinear(imgTensor, [inputSize, inputSize]);
-      // ── WICHTIG: Teachable Machine / MobileNet Normalisierung ──
-      // Nicht ÷255, sondern ÷127.5 − 1  →  Bereich wird [-1, +1]
-      const normalized = resized.div(127.5).sub(1.0);
-      // Batch-Dimension: [224,224,3] → [1,224,224,3]
-      const batched = normalized.expandDims(0);
-      // Inferenz
-      return model.predict(batched);
-    });
-
-    // Ergebnis auslesen — Softmax [Monitor_prob, Nichts_prob]
-    let result;
-    try {
-      const data = await prediction.data();
-      // data[0] = Wahrsch. "Monitor", data[1] = Wahrsch. "Nichts"
-      const monitorConf = data[0];
-      result = {
-        isMonitor: monitorConf >= Brain.MONITOR_CONFIDENCE_THRESHOLD,
-        confidence: monitorConf,
-        // Teachable Machine liefert keine Bounding Box —
-        // das Modell klassifiziert nur "Monitor" vs. "Nichts"
-        boundingBox: null
-      };
-      console.info(`[ImageCompare] TF-Ergebnis: Monitor=${(monitorConf * 100).toFixed(1)}%, Nichts=${(data[1] * 100).toFixed(1)}%`);
-    } catch (e) {
-      console.warn('[ImageCompare] TF-Inferenz fehlgeschlagen:', e);
-      result = { isMonitor: true, confidence: 0, boundingBox: null };
-    } finally {
-      // ── Speicher: Output-Tensor manuell disposen ──
-      if (Array.isArray(prediction)) prediction.forEach(t => t.dispose());
-      else prediction.dispose();
-    }
-
-    return result;
-  }
-
-  /* ─── PRIVATE STATE (erweitert) ─── */
-  let _worker = null;          // Improvement #2: Worker-Singleton
-  const _ocrCache = new Map(); // Improvement #6: OCR-Ergebnis-Cache
+  const CSS_ID = 'ic-styles';
+  const TESSERACT_SRC = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
   const OCR_CACHE_MAX = 5;
-  const CSS_ID = 'ic-styles';  // ID für das injizierte Stylesheet
+
+  let _isProcessing = false;
+  let _worker = null;
+  let _ocrProgressCallback = null;
+  const _ocrCache = new Map();
 
   function injectStyles() {
     if (document.getElementById(CSS_ID)) return;
@@ -170,561 +22,107 @@ window.ImageCompare = (function () {
     document.head.appendChild(link);
   }
 
-  /* ═══ 2b. WORKER-SINGLETON ═══════════════════════════════════════════ */
-
-  let _ocrProgressCallback = null;
-
-  /** Erstellt oder gibt den persistenten Tesseract-Worker zurück */
-  async function getWorker() {
-    await ensureTesseract();
-
-    if (_worker) return _worker;
-
-    _worker = await Tesseract.createWorker('deu+eng', 1, {
-      logger: (info) => {
-        if (info.status === 'recognizing text' && _ocrProgressCallback) {
-          _ocrProgressCallback(info.progress);
-        }
-      }
-    });
-
-    await _worker.setParameters({
-      tessedit_char_whitelist: '0123456789., OolI|Ss\n',
-      tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT
-    });
-
-    return _worker;
-  }
-
-  /** Worker explizit beenden (für Cleanup) */
-  async function terminateWorker() {
-    if (_worker) {
-      await _worker.terminate();
-      _worker = null;
-    }
-  }
-
-  /* ═══ 3. ROI-ERKENNUNG ═══════════════════════════════════════════════ */
-
-  /**
-   * Erkennt die Region of Interest (Bereich mit höchster Textdichte).
-   * Analysiert zeilenweise Schwarzpixel-Verteilung nach dem Threshold.
-   * @returns {{ x, y, w, h } | null} — Crop-Koordinaten oder null
-   */
-  function detectROI(imageData, w, h) {
-    const d = imageData.data;
-    const MIN_DENSITY = 0.03;     // Min. 3% schwarze Pixel pro Zeile
-    const MIN_BLOCK_HEIGHT = 0.05; // Min. 5% der Bildhöhe
-
-    // Zeilenweise Schwarzpixel-Dichte berechnen
-    const rowDensity = new Float32Array(h);
-    for (let y = 0; y < h; y++) {
-      let blackCount = 0;
-      for (let x = 0; x < w; x++) {
-        if (d[(y * w + x) * 4] === 0) blackCount++;
-      }
-      rowDensity[y] = blackCount / w;
-    }
-
-    // Dichtesten zusammenhängenden Block finden
-    let bestStart = 0, bestEnd = h - 1, bestScore = 0;
-    let blockStart = -1;
-
-    for (let y = 0; y < h; y++) {
-      if (rowDensity[y] >= MIN_DENSITY) {
-        if (blockStart === -1) blockStart = y;
-      } else {
-        if (blockStart !== -1) {
-          const blockH = y - blockStart;
-          if (blockH >= h * MIN_BLOCK_HEIGHT) {
-            // Score = Höhe × durchschnittliche Dichte
-            let totalDensity = 0;
-            for (let i = blockStart; i < y; i++) totalDensity += rowDensity[i];
-            const score = blockH * (totalDensity / blockH);
-            if (score > bestScore) {
-              bestScore = score;
-              bestStart = blockStart;
-              bestEnd = y;
-            }
-          }
-          blockStart = -1;
-        }
-      }
-    }
-    // Letzten Block prüfen
-    if (blockStart !== -1) {
-      const blockH = h - blockStart;
-      if (blockH >= h * MIN_BLOCK_HEIGHT) {
-        let totalDensity = 0;
-        for (let i = blockStart; i < h; i++) totalDensity += rowDensity[i];
-        const score = blockH * (totalDensity / blockH);
-        if (score > bestScore) {
-          bestStart = blockStart;
-          bestEnd = h;
-        }
-      }
-    }
-
-    // Nur croppen wenn ROI deutlich kleiner als Gesamtbild
-    const roiH = bestEnd - bestStart;
-    if (roiH < h * 0.8 && roiH > h * MIN_BLOCK_HEIGHT) {
-      // 10% Padding hinzufügen
-      const pad = Math.round(roiH * 0.1);
-      return {
-        x: 0,
-        y: Math.max(0, bestStart - pad),
-        w: w,
-        h: Math.min(h, roiH + 2 * pad)
-      };
-    }
-
-    return null; // Kein sinnvoller ROI gefunden
-  }
-
-  /* ═══ 6. OCR-CACHE ═══════════════════════════════════════════════════ */
-
-  /** Cache-Key aus File-Metadaten generieren */
-  function getCacheKey(file) {
-    return `${file.name}_${file.size}_${file.lastModified} `;
-  }
-
-  /* ─── TESSERACT.JS LAZY LOADING ──────────── */
   function ensureTesseract() {
     return new Promise((resolve, reject) => {
       if (typeof Tesseract !== 'undefined') {
         resolve();
         return;
       }
-      // Check if script is already loading
-      if (document.querySelector('script[data-ic-tesseract]')) {
+
+      const existing = document.querySelector('script[data-ic-tesseract]');
+      if (existing) {
         const check = setInterval(() => {
           if (typeof Tesseract !== 'undefined') {
             clearInterval(check);
             resolve();
           }
-        }, 200);
-        // Timeout after 30s
-        setTimeout(() => { clearInterval(check); reject(new Error('Tesseract-Timeout')); }, 30000);
+        }, 120);
+        setTimeout(() => {
+          clearInterval(check);
+          reject(new Error('Tesseract load timeout'));
+        }, 30000);
         return;
       }
+
       const sc = document.createElement('script');
-      sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+      sc.src = TESSERACT_SRC;
       sc.dataset.icTesseract = '1';
-      sc.onload = () => {
-        const check = setInterval(() => {
-          if (typeof Tesseract !== 'undefined') {
-            clearInterval(check);
-            resolve();
-          }
-        }, 100);
-        setTimeout(() => { clearInterval(check); reject(new Error('Tesseract-Timeout')); }, 15000);
-      };
-      sc.onerror = () => reject(new Error('Tesseract konnte nicht geladen werden.'));
+      sc.onload = () => resolve();
+      sc.onerror = () => reject(new Error('Tesseract could not be loaded'));
       document.head.appendChild(sc);
     });
   }
 
-  /* ═══ 2. PREPROCESSING — Modulare Bild-Pipeline (Web Worker Variante) ═════ */
+  async function getWorker() {
+    if (_worker) return _worker;
 
-  let _prepWorker = null;
-  let _prepCallbacks = {};
-  let _prepMsgId = 0;
+    await ensureTesseract();
 
-  function getPrepWorker() {
-    if (_prepWorker) return _prepWorker;
-    const workerCode = `
-  function toGrayscale(d) {
-    for (let i = 0; i < d.length; i += 4) {
-      const gray = Math.round(d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
-      d[i] = d[i + 1] = d[i + 2] = gray;
-    }
-  }
-  function applyGamma(d, gamma) {
-    if (!gamma || gamma === 1.0) return;
-    const inv = 1 / gamma;
-    for (let i = 0; i < d.length; i += 4) {
-      const corrected = Math.round(255 * Math.pow(d[i] / 255, inv));
-      d[i] = d[i + 1] = d[i + 2] = corrected;
-    }
-  }
-  // Moiré-Reduktion: Leichter Gaußscher Weichzeichner (sigma≈1.0) vor dem Schärfen
-  // eliminiert Scan-Lines alter Röhrenmonitore und LCD-Flachbildschirme
-  function gaussianBlur(d, w, h, sigma = 1.0) {
-    const r = Math.ceil(sigma * 2);
-    const kernel = [];
-    let sum = 0;
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const v = Math.exp(-(dx*dx + dy*dy) / (2 * sigma * sigma));
-        kernel.push({ dx, dy, v });
-        sum += v;
-      }
-    }
-    for (let k = 0; k < kernel.length; k++) kernel[k].v /= sum;
-    const out = new Uint8ClampedArray(d.length);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        let acc = 0;
-        for (let k = 0; k < kernel.length; k++) {
-          const nx = Math.max(0, Math.min(w - 1, x + kernel[k].dx));
-          const ny = Math.max(0, Math.min(h - 1, y + kernel[k].dy));
-          acc += d[(ny * w + nx) * 4] * kernel[k].v;
-        }
-        const i = (y * w + x) * 4;
-        const v = Math.round(Math.max(0, Math.min(255, acc)));
-        out[i] = out[i + 1] = out[i + 2] = v;
-        out[i + 3] = d[i + 3];
-      }
-    }
-    for (let i = 0; i < d.length; i++) d[i] = out[i];
-  }
-  function sharpen(d, w, h) {
-    const out = new Uint8ClampedArray(d.length);
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const i = (y * w + x) * 4;
-        const val = Math.max(0, Math.min(255,
-          5 * d[i] - d[((y - 1) * w + x) * 4] - d[((y + 1) * w + x) * 4] - d[(y * w + x - 1) * 4] - d[(y * w + x + 1) * 4]
-        ));
-        out[i] = out[i + 1] = out[i + 2] = val;
-        out[i + 3] = 255;
-      }
-    }
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const i = (y * w + x) * 4;
-        d[i] = out[i]; d[i + 1] = out[i + 1]; d[i + 2] = out[i + 2];
-      }
-    }
-  }
-  // Adaptiver Kontrast (CLAHE-Prinzip): Lokale Histogramm-Anpassung pro Tile
-  // Hilft bei spiegelnden Röhrenmonitoren und ungleichmäßiger Beleuchtung
-  function claheContrast(d, w, h, tileSize = 64, clipLimit = 2.0) {
-    const ts = Math.min(tileSize, Math.min(w, h) >> 1);
-    const tw = Math.ceil(w / ts), th = Math.ceil(h / ts);
-    const LUT = [];
-    for (let ty = 0; ty < th; ty++) {
-      for (let tx = 0; tx < tw; tx++) {
-        const x0 = tx * ts, y0 = ty * ts;
-        const x1 = Math.min(x0 + ts, w), y1 = Math.min(y0 + ts, h);
-        const hist = new Uint32Array(256);
-        for (let y = y0; y < y1; y++)
-          for (let x = x0; x < x1; x++)
-            hist[d[(y * w + x) * 4]]++;
-        const total = (x1 - x0) * (y1 - y0);
-        const clip = Math.max(1, Math.floor(total / 256 * clipLimit));
-        let excess = 0;
-        for (let i = 0; i < 256; i++) {
-          if (hist[i] > clip) { excess += hist[i] - clip; hist[i] = clip; }
-        }
-        const perBin = Math.floor(excess / 256);
-        for (let i = 0; i < 256; i++) hist[i] += perBin;
-        let sum = 0;
-        const lut = new Uint8Array(256);
-        for (let i = 0; i < 256; i++) {
-          sum += hist[i];
-          lut[i] = Math.round((sum / total) * 255);
-        }
-        LUT.push(lut);
-      }
-    }
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const tx = Math.min(Math.floor(x / ts), tw - 1);
-        const ty = Math.min(Math.floor(y / ts), th - 1);
-        const idx = ty * tw + tx;
-        const i = (y * w + x) * 4;
-        const v = LUT[idx][d[i]];
-        d[i] = d[i + 1] = d[i + 2] = v;
-      }
-    }
-  }
-  function stretchContrast(d) {
-    let lo = 255, hi = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      if (d[i] < lo) lo = d[i];
-      if (d[i] > hi) hi = d[i];
-    }
-    const range = hi - lo || 1;
-    for (let i = 0; i < d.length; i += 4) {
-      const v = Math.round(((d[i] - lo) / range) * 255);
-      d[i] = d[i + 1] = d[i + 2] = v;
-    }
-  }
-  function invert(d) {
-    for (let i = 0; i < d.length; i += 4) {
-      d[i] = 255 - d[i]; d[i + 1] = 255 - d[i + 1]; d[i + 2] = 255 - d[i + 2];
-    }
-  }
-  function adaptiveThreshold(d, w, h, windowRatio = 8, sensitivity = 0.15) {
-    const S = Math.max(1, Math.round(w / windowRatio));
-    const intImg = new Uint32Array(w * h);
-    for (let x = 0; x < w; x++) {
-      let sum = 0;
-      for (let y = 0; y < h; y++) {
-        const idx = y * w + x;
-        sum += d[idx * 4];
-        intImg[idx] = (x === 0) ? sum : intImg[idx - 1] + sum;
-      }
-    }
-    for (let x = 0; x < w; x++) {
-      for (let y = 0; y < h; y++) {
-        const x1 = Math.max(x - S, 0), x2 = Math.min(x + S, w - 1);
-        const y1 = Math.max(y - S, 0), y2 = Math.min(y + S, h - 1);
-        const count = (x2 - x1 + 1) * (y2 - y1 + 1);
-        const a = (y1 > 0 && x1 > 0) ? intImg[(y1 - 1) * w + (x1 - 1)] : 0;
-        const b = (y1 > 0) ? intImg[(y1 - 1) * w + x2] : 0;
-        const c = (x1 > 0) ? intImg[y2 * w + (x1 - 1)] : 0;
-        const sum = intImg[y2 * w + x2] - b - c + a;
-        const idx = (y * w + x) * 4;
-        const val = (d[idx] * count <= sum * (1.0 - sensitivity)) ? 0 : 255;
-        d[idx] = d[idx + 1] = d[idx + 2] = val;
-      }
-    }
-  }
-  function removeNoise(d, w, h, minNeighbors = 2) {
-    const remove = [];
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const idx = (y * w + x) * 4;
-        if (d[idx] === 0) {
-          let neighbors = 0;
-          for (let dy = -1; dy <= 1; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
-              if (dx === 0 && dy === 0) continue;
-              if (d[((y + dy) * w + (x + dx)) * 4] === 0) neighbors++;
-            }
-          }
-          if (neighbors < minNeighbors) remove.push(idx);
+    _worker = await Tesseract.createWorker('deu+eng', 1, {
+      logger: (info) => {
+        if (info && info.status === 'recognizing text' && _ocrProgressCallback) {
+          _ocrProgressCallback(info.progress || 0);
         }
       }
-    }
-    for (let i = 0; i < remove.length; i++) {
-      const idx = remove[i];
-      d[idx] = d[idx + 1] = d[idx + 2] = 255;
-    }
-  }
-  // Pixel-Connect: Morphologische Dilation (1px) — verbindet unterbrochene
-  // Segmente von alten LCD/LED-Anzeigen zu durchgehenden Ziffern
-  function dilate(d, w, h, radius = 1) {
-    const r = radius;
-    const out = new Uint8ClampedArray(d.length);
-    for (let i = 0; i < d.length; i++) out[i] = d[i];
-    for (let y = r; y < h - r; y++) {
-      for (let x = r; x < w - r; x++) {
-        const idx = (y * w + x) * 4;
-        let hasBlack = false;
-        for (let dy = -r; dy <= r && !hasBlack; dy++)
-          for (let dx = -r; dx <= r && !hasBlack; dx++)
-            if (d[((y + dy) * w + (x + dx)) * 4] === 0) hasBlack = true;
-        if (hasBlack) out[idx] = out[idx + 1] = out[idx + 2] = 0;
-      }
-    }
-    for (let i = 0; i < d.length; i++) d[i] = out[i];
-  }
-
-  self.onmessage = function (e) {
-    const { id, imageData, w, h, options } = e.data;
-    try {
-      const d = imageData.data;
-      toGrayscale(d);
-      applyGamma(d, options.gamma);
-      gaussianBlur(d, w, h, 1.0);
-      sharpen(d, w, h);
-      claheContrast(d, w, h);
-      if (options.invert) invert(d);
-      adaptiveThreshold(d, w, h);
-      removeNoise(d, w, h);
-      dilate(d, w, h, 1);
-      self.postMessage({ id, imageData }, [imageData.data.buffer]);
-    } catch (err) {
-      self.postMessage({ id, error: err.message });
-    }
-  };
-  `;
-    const blob = new Blob([workerCode], { type: 'application/javascript' });
-    _prepWorker = new Worker(URL.createObjectURL(blob));
-    _prepWorker.onmessage = function (e) {
-      const { id, imageData, error } = e.data;
-      if (_prepCallbacks[id]) {
-        if (error) _prepCallbacks[id].reject(new Error(error));
-        else _prepCallbacks[id].resolve(imageData);
-        delete _prepCallbacks[id];
-      }
-    };
-    return _prepWorker;
-  }
-
-  function runPrepWorkerAsync(imageData, w, h, options) {
-    return new Promise((resolve, reject) => {
-      const worker = getPrepWorker();
-      const id = ++_prepMsgId;
-      _prepCallbacks[id] = { resolve, reject };
-      worker.postMessage({ id, imageData, w, h, options }, [imageData.data.buffer]);
     });
-  }
 
-  const PREPROCESS = {
-    MAX_DIM: 1200,
-
-    prepareCanvas(imgEl, crop) {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      let sx = 0, sy = 0;
-      let srcW = imgEl.naturalWidth || imgEl.width;
-      let srcH = imgEl.naturalHeight || imgEl.height;
-      if (crop) { sx = crop.x; sy = crop.y; srcW = crop.w; srcH = crop.h; }
-
-      let w = srcW, h = srcH;
-      if (w > this.MAX_DIM || h > this.MAX_DIM) {
-        const scale = this.MAX_DIM / Math.max(w, h);
-        w = Math.round(w * scale);
-        h = Math.round(h * scale);
-      }
-      canvas.width = w;
-      canvas.height = h;
-      ctx.drawImage(imgEl, sx, sy, srcW, srcH, 0, 0, w, h);
-      return { canvas, ctx, w, h, imageData: ctx.getImageData(0, 0, w, h) };
-    },
-
-    async run(imgEl, options = {}) {
-      const { canvas, ctx, w, h, imageData } = this.prepareCanvas(imgEl, options.crop);
-
-      const processedImageData = await runPrepWorkerAsync(imageData, w, h, options);
-      ctx.putImageData(processedImageData, 0, 0);
-
-      const dataUrl = canvas.toDataURL('image/png');
-      canvas.width = 0;
-      canvas.height = 0;
-
-      return { dataUrl, width: w, height: h, imageData: processedImageData };
-    },
-  };
-
-  /* ═══ 4. SCORE-PARSING — Regelbasierte Punktzahl-Extraktion ═════════ */
-
-  /**
-   * Berechnet die gewichtete Konfidenz eines einzelnen Score-Kandidaten.
-   * Nutzt räumliche Lage, Keyword-Nähe, Typ und Geometrie.
-   */
-  function calculateCandidateWeight(valStr, bbox, type, isKK, canvasW, canvasH, cleanText) {
-    const W = SCORE_CONFIG.WEIGHTS;
-    let weight = 1.0;
-
-    // 1. Räumliche Gewichtung: Bonus für Nähe zur Bildmitte
-    if (bbox && canvasW && canvasH) {
-      const cx = canvasW / 2, cy = canvasH / 2;
-      const wordCx = bbox.x0 + (bbox.x1 - bbox.x0) / 2;
-      const wordCy = bbox.y0 + (bbox.y1 - bbox.y0) / 2;
-      const dist = Math.hypot(wordCx - cx, wordCy - cy);
-      const maxDist = Math.hypot(cx, cy);
-      weight += (1 - dist / maxDist) * W.CENTER_FACTOR;
+    if (_worker && _worker.setParameters) {
+      await _worker.setParameters({
+        tessedit_char_whitelist: '0123456789., OolI|Ss\n'
+      });
     }
 
-    // 2. Keyword-Nähe: Bonus wenn ein Schlüsselwort in der Nähe steht
-    const textLower = cleanText.toLowerCase();
-    for (const kw of SCORE_CONFIG.KEYWORDS) {
-      const kwIdx = textLower.indexOf(kw);
-      if (kwIdx === -1) continue;
-      const valIdx = cleanText.indexOf(valStr);
-      if (Math.abs(kwIdx - valIdx) < W.KEYWORD_MAX_DIST) {
-        weight += W.KEYWORD_NEAR_BONUS;
-        break; // Nur einmal bonussen
-      }
-    }
-
-    // 3. Typ-Gewichtung
-    if (type === 'labeled' || type === 'total') weight += W.LABELED_TYPE_BONUS;
-    if (isKK && !valStr.includes('.')) weight += W.FORMAT_MATCH_BONUS;
-    if (!isKK && valStr.includes('.')) weight += W.FORMAT_MATCH_BONUS;
-
-    return weight;
+    return _worker;
   }
 
-  /**
-   * Prüft das Seitenverhältnis einer erkannten Bounding Box.
-   * Ziffern haben typischerweise ein Höhe/Breite-Verhältnis von 1.2–2.8.
-   */
-  function calculateGeometryWeight(bbox) {
-    if (!bbox) return 1.0;
-    const G = SCORE_CONFIG.GEOMETRY;
-    const ratio = (bbox.y1 - bbox.y0) / Math.max(1, bbox.x1 - bbox.x0);
-    if (ratio < G.MIN || ratio > G.MAX) return SCORE_CONFIG.WEIGHTS.BAD_GEOMETRY_PENALTY;
-    if (ratio > G.GOOD_MIN && ratio < G.GOOD_MAX) return SCORE_CONFIG.WEIGHTS.GOOD_GEOMETRY_BONUS;
-    return 1.0;
+  function getDisciplineConfig(isKK, discipline) {
+    const fallback = isKK
+      ? { min: 50, max: 600, isInteger: true }
+      : { min: 50, max: 654, isInteger: false };
+
+    if (!SCORE_CONFIG || !SCORE_CONFIG.DISCIPLINES || !discipline) return fallback;
+    return SCORE_CONFIG.DISCIPLINES[discipline] || fallback;
   }
 
-  /**
-   * Extrahiert Punktzahl-Kandidaten aus OCR-Ergebnis.
-   * Nutzt Word-Level-Daten für exakte Bounding Boxes und Konfidenz.
-   * @returns {{ bestMatch, alternatives, allScores } | null}
-   */
-  function parseShootingScore(ocrResult, isKK, canvasW, canvasH, discipline = null) {
-    if (!ocrResult || !ocrResult.data || !ocrResult.data.words) return null;
+  function normalizeOCRText(text) {
+    let clean = (text || '').replace(/\r/g, ' ').replace(/\n/g, ' ');
+    clean = clean.replace(/[oO]/g, '0');
+    clean = clean.replace(/[lI|]/g, '1');
+    clean = clean.replace(/,/g, '.');
+    clean = clean.replace(/\s+/g, ' ').trim();
+    return clean;
+  }
 
-    const cleanText = cleanOCRText(ocrResult.data.text);
-    const words = ocrResult.data.words || [];
-    const { min, max } = SCORE_CONFIG.VALID_RANGE;
+  function parseScoreFromText(text, isKK, discipline) {
+    const clean = normalizeOCRText(text);
+    const cfg = getDisciplineConfig(isKK, discipline);
+    const min = cfg.min;
+    const max = cfg.max;
+
     const candidates = [];
+    const decimalRegex = /(\d{2,3})\.(\d)\b/g;
+    let m;
 
-    // Quelle 1: Individuelle Wörter mit Bounding-Box-Daten
-    for (const w of words) {
-      const cleaned = cleanOCRText(w.text);
-      const valDec = parseFloat(cleaned);
-      // Validation Check (Discipline Context)
-      const discConfig = discipline ? SCORE_CONFIG.DISCIPLINES[discipline] : null;
-
-      if (!isNaN(valDec) && valDec >= SCORE_CONFIG.VALID_RANGE.min && valDec <= SCORE_CONFIG.VALID_RANGE.max) {
-        const typeStr = cleaned.includes('.') ? 'decimal' : 'integer';
-        const geometryConf = calculateGeometryWeight(w.bbox);
-        const rawConf = w.confidence / 100;
-
-        let conf = rawConf * geometryConf;
-        conf *= calculateCandidateWeight(cleaned, w.bbox, typeStr, isKK, canvasW, canvasH, cleanText);
-
-        let isValid = true;
-        if (discConfig) {
-          // 1. Check Range constraints
-          if (valDec < discConfig.min || valDec > discConfig.max) {
-            isValid = false; // Completely ignore values outside expected discipline range
-          }
-          // 2. Format constraint enforcement
-          if (isValid) {
-            if (discConfig.isInteger && typeStr === 'decimal') {
-              conf *= 0.2; // Massive penalty for decimals in KK_30
-            } else if (!discConfig.isInteger && typeStr === 'integer') {
-              conf *= 0.6; // Moderate penalty for integers in LG formats
-            }
-          }
-        }
-
-        if (isValid) {
-          candidates.push({
-            value: valDec,
-            type: typeStr,
-            confidence: conf,
-            bbox: w.bbox,
-            rawWord: cleaned
-          });
-        }
+    while ((m = decimalRegex.exec(clean)) !== null) {
+      const value = parseFloat(m[1] + '.' + m[2]);
+      if (value >= min && value <= max) {
+        candidates.push({ value, confidence: 0.9, type: 'decimal' });
       }
     }
-    // Quelle 2: Regex-Suche nach Dezimalzahlen im Gesamttext (Fallback)
-    const decRegex = /(\d{2,3})[.,](\d)\b/g;
-    let m;
-    while ((m = decRegex.exec(cleanText)) !== null) {
-      const val = parseFloat(m[1] + '.' + m[2]);
-      if (val < min || val > max) continue;
-      const weight = calculateCandidateWeight(m[0], null, 'decimal', isKK, canvasW, canvasH, cleanText);
-      candidates.push({ value: val, type: 'decimal', confidence: 0.8 * weight });
+
+    const intRegex = /\b(\d{2,3})\b/g;
+    while ((m = intRegex.exec(clean)) !== null) {
+      const value = parseInt(m[1], 10);
+      if (value >= min && value <= max) {
+        candidates.push({ value, confidence: isKK ? 0.92 : 0.65, type: 'integer' });
+      }
     }
 
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) {
+      return { bestMatch: null, alternatives: [] };
+    }
 
-    // Sortieren nach Konfidenz (höchste zuerst)
     candidates.sort((a, b) => b.confidence - a.confidence);
-
-    // Deduplizierung: Werte die ≤0.1 voneinander abweichen zusammenfassen
     const unique = [];
     for (const c of candidates) {
       if (!unique.some(u => Math.abs(u.value - c.value) < 0.1)) {
@@ -732,238 +130,53 @@ window.ImageCompare = (function () {
       }
     }
 
-
-
-    return { bestMatch: unique[0], alternatives: unique.slice(1, 4), allScores: unique };
-  }
-
-  /* ═══ 5. UI-RENDERING ══════════════════════════════════════════════ */
-
-  // Reveal the statically defined upload overlay
-  function createOverlay(botScore, isKK) {
-    const overlay = document.getElementById('icOverlay');
-    if (!overlay) {
-      console.error('[ImageCompare] Fehler: #icOverlay nicht in index.html gefunden!');
-      return null;
+    let best = unique[0];
+    if (!isKK) {
+      const preferredDec = unique.find(c => c.type === 'decimal');
+      if (preferredDec) best = preferredDec;
     }
 
-    // Reset UI to default state
-    resetUploadZone(overlay, isKK);
-
-    // Show overlay
-    overlay.style.opacity = '1';
-    overlay.style.pointerEvents = 'auto';
-
-    // Store data attributes
-    overlay.dataset.botScore = botScore || 0;
-
-    // Ensure events are attached (using a flag to prevent multiple attachments if called multiple times)
-    if (!overlay.dataset.eventsAttached) {
-      setupOverlayEvents(overlay, isKK);
-      overlay.dataset.eventsAttached = 'true';
-    }
-
-    return overlay;
+    return { bestMatch: best, alternatives: unique.filter(c => c !== best).slice(0, 3) };
   }
 
-  function setupOverlayEvents(overlay, isKK) {
-    const closeBtn = overlay.querySelector('#icClose');
-    const fileInput = overlay.querySelector('#icFileInput');
-    const uploadZone = overlay.querySelector('#icUploadZone');
-    const compareBtn = overlay.querySelector('#icCompareBtn');
-    const rawToggle = overlay.querySelector('#icRawToggle');
-    const rawText = overlay.querySelector('#icRawText');
-    const scoreInput = overlay.querySelector('#icScoreInput');
-    const btnWrong = overlay.querySelector('#icBtnWrong');
-    const editScoreBlock = overlay.querySelector('#icEditScoreBlock');
-
-    // Close
-    closeBtn.addEventListener('click', () => closeOverlay());
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) closeOverlay();
-    });
-
-    // Toggle wrong button
-    if (btnWrong) {
-      btnWrong.addEventListener('click', () => {
-        btnWrong.style.display = 'none';
-        editScoreBlock.style.display = 'block';
-        scoreInput.focus();
-      });
-    }
-
-    // File input
-    fileInput.addEventListener('change', (e) => {
-      const file = e.target.files[0];
-      const botScore = parseFloat(overlay.dataset.botScore) || 0;
-      const discipline = overlay.dataset.discipline || null; // Retrieve discipline from overlay
-      if (file) handleImageFile(file, overlay, botScore, isKK, discipline);
-    });
-
-    // Drag & drop
-    uploadZone.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      uploadZone.classList.add('dragover');
-    });
-    uploadZone.addEventListener('dragleave', () => {
-      uploadZone.classList.remove('dragover');
-    });
-    uploadZone.addEventListener('drop', (e) => {
-      e.preventDefault();
-      uploadZone.classList.remove('dragover');
-      const file = e.dataTransfer?.files[0];
-      const botScore = parseFloat(overlay.dataset.botScore) || 0;
-      const discipline = overlay.dataset.discipline || null; // Retrieve discipline from overlay
-      if (file && file.type.startsWith('image/')) {
-        handleImageFile(file, overlay, botScore, isKK, discipline);
-      }
-    });
-
-    // Compare button (now the final submit)
-    compareBtn.addEventListener('click', () => {
-      const playerScore = parseFloat(scoreInput.value);
-      const botScore = parseFloat(overlay.dataset.botScore) || 0;
-      if (isNaN(playerScore) || playerScore < 0) {
-        scoreInput.style.borderColor = 'rgba(240,80,60,.6)';
-        setTimeout(() => { scoreInput.style.borderColor = ''; }, 1200);
-        return;
-      }
-
-      // Feedback-Upload prüfen
-      const originalDetected = overlay.dataset.detectedScore ? parseFloat(overlay.dataset.detectedScore) : -1;
-      if (Brain.FEEDBACK_ENABLED && overlay._currentFile && originalDetected >= 0 && originalDetected !== playerScore) {
-        sendToFormspree(overlay._currentFile, playerScore, originalDetected);
-      }
-
-      closeOverlay();
-
-      // Trigger the real main game over
-      const playerInp = document.getElementById('playerInp');
-      const playerInpInt = document.getElementById('playerInpInt');
-      const calcFunc = window.calcResult || (typeof calcResult === 'function' ? calcResult : null);
-
-      if (playerInp || playerInpInt) {
-        if (isKK && playerInpInt) {
-          playerInpInt.value = Math.floor(playerScore);
-        } else if (!isKK) {
-          if (playerInp) playerInp.value = playerScore.toFixed(1);
-          if (playerInpInt) playerInpInt.value = Math.floor(playerScore);
-        }
-
-        // Directly trigger the result calculation in index.html
-        if (typeof calcFunc === 'function') {
-          calcFunc();
-        } else if (typeof window.showGameOver === 'function') {
-          window.showGameOver(playerScore, botScore, null, Math.floor(playerScore));
-        }
-
-        setTimeout(() => {
-          if (typeof window.restartGame === 'function') {
-            window.restartGame();
-          }
-        }, 5000);
-      }
-    });
-
-    // Score input → enable compare button
-    scoreInput.addEventListener('input', () => {
-      const val = parseFloat(scoreInput.value);
-      compareBtn.disabled = isNaN(val) || val < 0;
-    });
-    // Enter key → compare
-    scoreInput.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') compareBtn.click();
-    });
-
-    // Raw OCR toggle
-    rawToggle.addEventListener('click', () => {
-      rawText.classList.toggle('visible');
-      rawToggle.textContent = rawText.classList.contains('visible')
-        ? '▼ OCR-Rohtext ausblenden'
-        : '▶ OCR-Rohtext anzeigen';
-    });
-
-    // Swipe-down to close
-    let startY = 0;
-    const sheet = overlay.querySelector('.ic-sheet');
-    sheet.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; }, { passive: true });
-    sheet.addEventListener('touchend', (e) => {
-      const dy = e.changedTouches[0].clientY - startY;
-      if (dy > 80) closeOverlay();
-    }, { passive: true });
+  function getCacheKey(file) {
+    return [file.name, file.size, file.lastModified].join('|');
   }
 
-  function closeOverlay() {
-    const overlay = document.getElementById('icOverlay');
-    if (overlay) {
-      overlay.style.opacity = '0';
-      overlay.style.pointerEvents = 'none';
-      overlay.style.transition = 'opacity .2s';
-      // Reset inputs after closing to prevent stale data briefly flashing on next open
-      // This is now handled by resetUploadZone when createOverlay is called.
-    }
-    _isProcessing = false;
-  }
-
-  /* ─── IMAGE PROCESSING FLOW ─────────────── */
-  async function handleImageFile(file, overlay, botScore, isKK, discipline = null) {
-    if (_isProcessing) return;
-    _isProcessing = true;
-
-    // Grab discipline attached to overlay by open()
-    // const discipline = overlay.dataset.discipline || null; // discipline is now passed as an argument
-
-    // Improvement #6: OCR-Ergebnis-Cache
-    const cacheKey = getCacheKey(file);
-    const cachedResult = _ocrCache.get(cacheKey);
-
-    const uploadZone = overlay.querySelector('#icUploadZone');
+  function updateProgress(overlay, pct, statusText) {
     const progress = overlay.querySelector('#icProgress');
     const progressFill = overlay.querySelector('#icProgressFill');
     const progressStatus = overlay.querySelector('#icProgressStatus');
-    const resultCard = overlay.querySelector('#icResultCard');
-    const detectedValue = overlay.querySelector('#icDetectedValue');
-    const detectedLabel = overlay.querySelector('#icDetectedLabel');
-    const scoreInput = overlay.querySelector('#icScoreInput');
-    const compareBtn = overlay.querySelector('#icCompareBtn');
-    const rawText = overlay.querySelector('#icRawText');
+    if (progress) progress.classList.add('active');
+    if (progressFill) progressFill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    if (progressStatus) progressStatus.textContent = statusText;
+  }
 
-    const objectUrl = URL.createObjectURL(file);
-
-    uploadZone.classList.add('has-image');
-  /* ═══ 5. UI-RENDERING ══════════════════════════════════════════════ */
-
-  // Reveal the statically defined upload overlay
   function createOverlay(botScore, isKK) {
     const overlay = document.getElementById('icOverlay');
     if (!overlay) {
-      console.error('[ImageCompare] Fehler: #icOverlay nicht in index.html gefunden!');
+      console.error('[ImageCompare] #icOverlay not found in index.html');
       return null;
     }
 
-    // Reset UI to default state
     resetUploadZone(overlay, isKK);
-    
-    // Show overlay
+
     overlay.style.opacity = '1';
     overlay.style.pointerEvents = 'auto';
+    overlay.style.transition = 'opacity .2s';
+    overlay.dataset.botScore = String(botScore || 0);
+    overlay.dataset.isKK = isKK ? 'true' : 'false';
 
-    // Store data attributes
-    overlay.dataset.botScore = botScore || 0;
-    overlay.dataset.isKK = isKK; // Store isKK for closeOverlay and other functions
-    
-    // Ensure events are attached (using a flag to prevent multiple attachments if called multiple times)
     if (!overlay.dataset.eventsAttached) {
-      setupOverlayEvents(overlay, isKK);
+      setupOverlayEvents(overlay);
       overlay.dataset.eventsAttached = 'true';
     }
 
     return overlay;
   }
 
-  function setupOverlayEvents(overlay, isKK) {
+  function setupOverlayEvents(overlay) {
     const closeBtn = overlay.querySelector('#icClose');
-    const fileInput = overlay.querySelector('#icFileInput');
     const uploadZone = overlay.querySelector('#icUploadZone');
     const compareBtn = overlay.querySelector('#icCompareBtn');
     const rawToggle = overlay.querySelector('#icRawToggle');
@@ -971,108 +184,65 @@ window.ImageCompare = (function () {
     const scoreInput = overlay.querySelector('#icScoreInput');
     const btnWrong = overlay.querySelector('#icBtnWrong');
     const editScoreBlock = overlay.querySelector('#icEditScoreBlock');
+    const sheet = overlay.querySelector('.ic-sheet');
 
-    // Close
-    closeBtn.addEventListener('click', () => closeOverlay());
+    if (!uploadZone || !compareBtn || !rawToggle || !rawText || !scoreInput || !sheet) return;
+
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => closeOverlay());
+    }
+
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) closeOverlay();
     });
 
-    // Toggle wrong button
-    if (btnWrong) {
-      btnWrong.addEventListener('click', () => {
-        btnWrong.style.display = 'none';
-        editScoreBlock.style.display = 'block';
-        scoreInput.focus();
-      });
-    }
-
-    // File input (using event delegation on uploadZone to handle dynamic content)
     uploadZone.addEventListener('change', (e) => {
-      if (e.target.id === 'icFileInput') {
-        const file = e.target.files[0];
-        const botScore = parseFloat(overlay.dataset.botScore) || 0;
-        const discipline = overlay.dataset.discipline || null;
-        if (file) handleImageFile(file, overlay, botScore, isKK, discipline);
+      if (e.target && e.target.id === 'icFileInput') {
+        const file = e.target.files && e.target.files[0];
+        if (file) {
+          handleImageFile(file, overlay);
+        }
       }
     });
 
-    // Drag & drop
     uploadZone.addEventListener('dragover', (e) => {
       e.preventDefault();
       uploadZone.classList.add('dragover');
     });
+
     uploadZone.addEventListener('dragleave', () => {
       uploadZone.classList.remove('dragover');
     });
+
     uploadZone.addEventListener('drop', (e) => {
       e.preventDefault();
       uploadZone.classList.remove('dragover');
-      const file = e.dataTransfer?.files[0];
-      const botScore = parseFloat(overlay.dataset.botScore) || 0;
-      const discipline = overlay.dataset.discipline || null;
-      if (file && file.type.startsWith('image/')) {
-        handleImageFile(file, overlay, botScore, isKK, discipline);
+      const file = e.dataTransfer && e.dataTransfer.files ? e.dataTransfer.files[0] : null;
+      if (file && file.type && file.type.startsWith('image/')) {
+        handleImageFile(file, overlay);
       }
     });
 
-    // Compare button (now the final submit)
-    compareBtn.addEventListener('click', () => {
-      const playerScore = parseFloat(scoreInput.value);
-      const botScore = parseFloat(overlay.dataset.botScore) || 0;
-      if (isNaN(playerScore) || playerScore < 0) {
-        scoreInput.style.borderColor = 'rgba(240,80,60,.6)';
-        setTimeout(() => { scoreInput.style.borderColor = ''; }, 1200);
-        return;
-      }
+    if (btnWrong && editScoreBlock) {
+      btnWrong.addEventListener('click', () => {
+        btnWrong.style.display = 'none';
+        editScoreBlock.style.display = 'block';
+        scoreInput.focus();
+      });
+    }
 
-      // Feedback-Upload prüfen
-      const originalDetected = overlay.dataset.detectedScore ? parseFloat(overlay.dataset.detectedScore) : -1;
-      if (Brain.FEEDBACK_ENABLED && overlay._currentFile && originalDetected >= 0 && originalDetected !== playerScore) {
-        sendToFormspree(overlay._currentFile, playerScore, originalDetected);
-      }
-
-      closeOverlay();
-
-      // Trigger the real main game over
-      const playerInp = document.getElementById('playerInp');
-      const playerInpInt = document.getElementById('playerInpInt');
-      const calcFunc = window.calcResult || (typeof calcResult === 'function' ? calcResult : null);
-
-      if (playerInp || playerInpInt) {
-        if (isKK && playerInpInt) {
-          playerInpInt.value = Math.floor(playerScore);
-        } else if (!isKK) {
-          if (playerInp) playerInp.value = playerScore.toFixed(1);
-          if (playerInpInt) playerInpInt.value = Math.floor(playerScore);
-        }
-
-        // Directly trigger the result calculation in index.html
-        if (typeof calcFunc === 'function') {
-          calcFunc();
-        } else if (typeof window.showGameOver === 'function') {
-          window.showGameOver(playerScore, botScore, null, Math.floor(playerScore));
-        }
-
-        setTimeout(() => {
-          if (typeof window.restartGame === 'function') {
-            window.restartGame();
-          }
-        }, 5000);
-      }
-    });
-
-    // Score input → enable compare button
     scoreInput.addEventListener('input', () => {
-      const val = parseFloat(scoreInput.value);
-      compareBtn.disabled = isNaN(val) || val < 0;
-    });
-    // Enter key → compare
-    scoreInput.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') compareBtn.click();
+      const val = parseFloat(String(scoreInput.value).replace(',', '.'));
+      compareBtn.disabled = Number.isNaN(val) || val < 0;
     });
 
-    // Raw OCR toggle
+    scoreInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        compareBtn.click();
+      }
+    });
+
     rawToggle.addEventListener('click', () => {
       rawText.classList.toggle('visible');
       rawToggle.textContent = rawText.classList.contains('visible')
@@ -1080,10 +250,45 @@ window.ImageCompare = (function () {
         : '▶ OCR-Rohtext anzeigen';
     });
 
-    // Swipe-down to close
+    compareBtn.addEventListener('click', () => {
+      const isKK = overlay.dataset.isKK === 'true';
+      const botScore = parseFloat(overlay.dataset.botScore) || 0;
+      const playerScore = parseFloat(String(scoreInput.value).replace(',', '.'));
+      if (Number.isNaN(playerScore) || playerScore < 0) {
+        scoreInput.style.borderColor = 'rgba(240,80,60,.6)';
+        setTimeout(() => { scoreInput.style.borderColor = ''; }, 1200);
+        return;
+      }
+
+      const detected = overlay.dataset.detectedScore ? parseFloat(overlay.dataset.detectedScore) : NaN;
+      if (Brain && Brain.FEEDBACK_ENABLED && overlay._currentFile && !Number.isNaN(detected) && Math.abs(detected - playerScore) > 0.0001) {
+        sendToFormspree(overlay._currentFile, playerScore, detected);
+      }
+
+      closeOverlay();
+
+      const playerInp = document.getElementById('playerInp');
+      const playerInpInt = document.getElementById('playerInpInt');
+
+      if (isKK) {
+        if (playerInpInt) playerInpInt.value = String(Math.floor(playerScore));
+      } else {
+        if (playerInp) playerInp.value = playerScore.toFixed(1);
+        if (playerInpInt) playerInpInt.value = String(Math.floor(playerScore));
+      }
+
+      if (typeof window.calcResult === 'function') {
+        window.calcResult();
+      } else if (typeof window.showGameOver === 'function') {
+        window.showGameOver(playerScore, botScore, null, Math.floor(playerScore));
+      }
+    });
+
     let startY = 0;
-    const sheet = overlay.querySelector('.ic-sheet');
-    sheet.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; }, { passive: true });
+    sheet.addEventListener('touchstart', (e) => {
+      startY = e.touches[0].clientY;
+    }, { passive: true });
+
     sheet.addEventListener('touchend', (e) => {
       const dy = e.changedTouches[0].clientY - startY;
       if (dy > 80) closeOverlay();
@@ -1095,235 +300,115 @@ window.ImageCompare = (function () {
     if (overlay) {
       overlay.style.opacity = '0';
       overlay.style.pointerEvents = 'none';
-      overlay.style.transition = 'opacity .2s';
-      
-      const isKK = overlay.dataset.isKK === 'true'; // Retrieve isKK from dataset
-      resetUploadZone(overlay, isKK); // Reset UI state
+      const isKK = overlay.dataset.isKK === 'true';
+      resetUploadZone(overlay, isKK);
     }
     _isProcessing = false;
   }
 
-  /* ─── IMAGE PROCESSING FLOW ─────────────── */
-  async function handleImageFile(file, overlay, botScore, isKK, discipline = null) {
+  async function handleImageFile(file, overlay) {
     if (_isProcessing) return;
     _isProcessing = true;
 
-    // Improvement #6: OCR-Ergebnis-Cache
+    const isKK = overlay.dataset.isKK === 'true';
+    const discipline = overlay.dataset.discipline || null;
     const cacheKey = getCacheKey(file);
-    const cachedResult = _ocrCache.get(cacheKey);
 
     const uploadZone = overlay.querySelector('#icUploadZone');
-    const progress = overlay.querySelector('#icProgress');
-    const progressFill = overlay.querySelector('#icProgressFill');
-    const progressStatus = overlay.querySelector('#icProgressStatus');
     const resultCard = overlay.querySelector('#icResultCard');
-    const detectedValue = overlay.querySelector('#icDetectedValue');
-    const detectedLabel = overlay.querySelector('#icDetectedLabel');
-    const scoreInput = overlay.querySelector('#icScoreInput');
-    const compareBtn = overlay.querySelector('#icCompareBtn');
-    const rawText = overlay.querySelector('#icRawText');
+
+    if (!uploadZone || !resultCard) {
+      _isProcessing = false;
+      return;
+    }
 
     const objectUrl = URL.createObjectURL(file);
+    let revoked = false;
+    const safeRevoke = () => {
+      if (revoked) return;
+      revoked = true;
+      URL.revokeObjectURL(objectUrl);
+    };
 
     uploadZone.classList.add('has-image');
-    // Hide original upload elements
-    uploadZone.querySelector('.ic-upload-icon').style.display = 'none';
-    uploadZone.querySelector('.ic-upload-text').style.display = 'none';
-    uploadZone.querySelector('.ic-upload-sub').style.display = 'none';
-    uploadZone.querySelector('#icFileInput').style.display = 'none'; // Hide the input itself
+    const icon = uploadZone.querySelector('.ic-upload-icon');
+    const text = uploadZone.querySelector('.ic-upload-text');
+    const sub = uploadZone.querySelector('.ic-upload-sub');
+    const input = uploadZone.querySelector('#icFileInput');
+    if (icon) icon.style.display = 'none';
+    if (text) text.style.display = 'none';
+    if (sub) sub.style.display = 'none';
+    if (input) input.style.display = 'none';
 
-    // Create and append preview
     const previewWrap = document.createElement('div');
     previewWrap.className = 'ic-preview-wrap';
     previewWrap.innerHTML = `
-  < img class="ic-preview-img" src = "${objectUrl}" alt = "Upload" id = "icPreviewImg" >
-    <div class="ic-remove-img" id="icRemoveImg" title="Bild entfernen">✕</div>
-`;
+      <img class="ic-preview-img" src="${objectUrl}" alt="Upload" id="icPreviewImg">
+      <div class="ic-remove-img" id="icRemoveImg" title="Bild entfernen">✕</div>
+    `;
     uploadZone.appendChild(previewWrap);
 
     const removeBtn = previewWrap.querySelector('#icRemoveImg');
     if (removeBtn) {
       removeBtn.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        URL.revokeObjectURL(objectUrl);
+        safeRevoke();
         resetUploadZone(overlay, isKK);
         _isProcessing = false;
       });
     }
 
-    if (cachedResult) {
-      URL.revokeObjectURL(objectUrl);
-      renderOCRResult(cachedResult, cachedResult.rawText, overlay, isKK);
+    const cached = _ocrCache.get(cacheKey);
+    if (cached) {
+      renderOCRResult(cached, cached.rawText || '', overlay, isKK);
+      safeRevoke();
       _isProcessing = false;
       return;
     }
 
-    progress.classList.add('active');
-    resultCard.classList.remove('active');
-    progressFill.style.width = '5%';
-    progressStatus.textContent = 'Bild wird vorbereitet…';
-
     overlay._currentFile = file;
 
     try {
-      const img = new Image();
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = reject;
-        img.src = objectUrl;
-      });
-
-      progressFill.style.width = '10%';
-      progressStatus.textContent = '🧠 TensorFlow: Prüfe Monitor-Erkennung…';
-
-      // ═══ TENSORFLOW MONITOR-ERKENNUNG & AUTO-CROP ═══════════════════
-      // Vor der OCR prüfen wir, ob das Bild überhaupt einen Monitor zeigt.
-      // Wenn ja UND eine Bounding Box zurückkommt → Auto-Crop für bessere OCR.
-      let tfCrop = null;
-      const monitorResult = await detectMonitor(img);
-
-      if (!monitorResult.isMonitor) {
-        // Kein Monitor erkannt → Benutzer informieren, aber trotzdem weitermachen
-        progressStatus.textContent = '⚠ Kein Monitor erkannt — versuche trotzdem OCR…';
-        await delay(800);
-      } else if (monitorResult.boundingBox) {
-        // ── Auto-Crop: TF-Modell hat Ergebnis-Bereich erkannt ──
-        // Bounding Box ist normalisiert (0–1), umrechnen auf Pixel
-        const imgW = img.naturalWidth || img.width;
-        const imgH = img.naturalHeight || img.height;
-        const bb = monitorResult.boundingBox;
-        tfCrop = {
-          x: Math.round(bb.x * imgW),
-          y: Math.round(bb.y * imgH),
-          w: Math.round(bb.w * imgW),
-          h: Math.round(bb.h * imgH)
-        };
-        progressStatus.textContent = `✓ Monitor erkannt(${ Math.round(monitorResult.confidence * 100) } %) — Auto - Crop aktiv`;
-        await delay(400);
-      } else if (monitorResult.confidence > 0) {
-        progressStatus.textContent = `✓ Monitor erkannt(${ Math.round(monitorResult.confidence * 100) } %)`;
-        await delay(300);
-      }
-
-      progressFill.style.width = '15%';
-      progressStatus.textContent = 'Lade Tesseract.js OCR-Engine…';
-
-      _ocrProgressCallback = (prog) => {
-        const pct = Math.round(30 + prog * 50);
-        progressFill.style.width = pct + '%';
-        progressStatus.textContent = `Texterkennung… ${ Math.round(prog * 100) }% `;
-      };
+      updateProgress(overlay, 10, 'Bild wird vorbereitet...');
+      resultCard.classList.remove('active');
 
       const worker = await getWorker();
+      if (!worker) throw new Error('OCR worker unavailable');
 
-      progressFill.style.width = '25%';
-      progressStatus.textContent = 'Erkenne interessanten Bereich (ROI)…';
+      updateProgress(overlay, 25, 'OCR Engine wird geladen...');
+      _ocrProgressCallback = (prog) => {
+        const pct = Math.round(30 + (prog || 0) * 60);
+        updateProgress(overlay, pct, 'Texterkennung laeuft...');
+      };
 
-      try {
-        let bestParsed = null;
-        let bestResult = null;
-        let bestConf = 0;
+      const result = await worker.recognize(objectUrl);
+      _ocrProgressCallback = null;
 
-        // ── Crop-Logik: TF-Crop hat Vorrang, sonst ROI-Fallback ──
-        let crop = tfCrop;
+      const rawText = result && result.data && result.data.text ? result.data.text : '';
+      const parsed = parseScoreFromText(rawText, isKK, discipline);
+      parsed.rawText = rawText;
 
-        if (!crop) {
-          // Fallback: Klassische ROI-Erkennung (Pixel-Analyse)
-          const roiPrep = await PREPROCESS.run(img, { gamma: 1.0 });
-          const roiCanvas = document.createElement('canvas');
-          const roiCtx = roiCanvas.getContext('2d');
-          const roiImg = new Image();
-          roiImg.src = roiPrep.dataUrl;
-          await new Promise(r => { roiImg.onload = r; });
-          roiCanvas.width = roiPrep.width;
-          roiCanvas.height = roiPrep.height;
-          roiCtx.drawImage(roiImg, 0, 0);
-          const roiCrop = detectROI(roiCtx.getImageData(0, 0, roiPrep.width, roiPrep.height), roiPrep.width, roiPrep.height);
-
-          // ── Speicher: Canvas sofort freigeben ──
-          roiCanvas.width = 0;
-          roiCanvas.height = 0;
-
-          if (roiCrop) {
-            const scaleX = (img.naturalWidth || img.width) / roiPrep.width;
-            const scaleY = (img.naturalHeight || img.height) / roiPrep.height;
-            crop = {
-              x: roiCrop.x * scaleX,
-              y: roiCrop.y * scaleY,
-              w: roiCrop.w * scaleX,
-              h: roiCrop.h * scaleY
-            };
-          }
+      if (parsed.bestMatch) {
+        _ocrCache.set(cacheKey, parsed);
+        while (_ocrCache.size > OCR_CACHE_MAX) {
+          const first = _ocrCache.keys().next().value;
+          _ocrCache.delete(first);
         }
-
-        for (let i = 0; i < OCR_PASSES.length; i++) {
-          const pass = OCR_PASSES[i];
-          if (bestConf >= pass.triggerBelow) continue;
-
-          progressStatus.textContent = `Analysiere Bild(${ pass.name }, Pass ${ i + 1} / ${OCR_PASSES.length})…`;
-          progressFill.style.width = Math.round(30 + (i / OCR_PASSES.length) * 60) + '%';
-
-          const prepOptions = { ...pass.options, crop };
-          const prep = await PREPROCESS.run(img, prepOptions);
-          const result = await worker.recognize(prep.dataUrl);
-          const parsed = parseShootingScore(result, isKK, prep.width, prep.height, discipline);
-
-          if (parsed?.bestMatch && parsed.bestMatch.confidence > bestConf) {
-            bestParsed = parsed;
-            bestResult = result;
-            bestConf = parsed.bestMatch.confidence;
-          }
-        }
-
-        // ── Speicher: Object-URL revoken ──
-        URL.revokeObjectURL(objectUrl);
-
-        progressFill.style.width = '95%';
-        progressStatus.textContent = 'Ergebnis wird finalisiert…';
-        await delay(200);
-
-        progressFill.style.width = '100%';
-        progressStatus.textContent = '✓ Analyse abgeschlossen';
-
-        const rawTextStr = bestResult?.data?.text || '(kein Text erkannt)';
-        bestParsed = bestParsed || {};
-        bestParsed.rawText = rawTextStr;
-
-        if (bestParsed && bestParsed.bestMatch) {
-          _ocrCache.set(cacheKey, bestParsed);
-          if (_ocrCache.size > OCR_CACHE_MAX) {
-            const firstKey = _ocrCache.keys().next().value;
-            _ocrCache.delete(firstKey);
-          }
-        }
-
-        renderOCRResult(bestParsed, rawTextStr, overlay, isKK);
-
-        // Worker remains persistent (Improvement #2)
-
-      } catch (innerErr) {
-        throw innerErr;
       }
 
+      updateProgress(overlay, 100, 'Analyse abgeschlossen');
+      renderOCRResult(parsed, rawText, overlay, isKK);
     } catch (err) {
-      console.error('ImageCompare OCR error:', err);
-      progressFill.style.width = '100%';
-      progressFill.style.background = 'linear-gradient(90deg, #d04030, #f08070)';
-      progressStatus.textContent = '⚠ Fehler: ' + (err.message || 'OCR fehlgeschlagen');
-
-      await delay(1500);
-      progress.classList.remove('active');
-      resultCard.classList.add('active');
-      detectedValue.textContent = '?';
-      detectedLabel.textContent = 'OCR fehlgeschlagen – bitte Ergebnis manuell eingeben';
-      scoreInput.value = '';
-      scoreInput.focus();
+      console.warn('[ImageCompare] OCR failed:', err);
+      updateProgress(overlay, 100, 'OCR fehlgeschlagen - manuelle Eingabe');
+      renderOCRResult({ bestMatch: null, alternatives: [] }, '', overlay, isKK);
+    } finally {
+      safeRevoke();
+      _isProcessing = false;
     }
-
-    _isProcessing = false;
   }
 
-  function renderOCRResult(bestParsed, rawTextStr, overlay, isKK) {
+  function renderOCRResult(parsed, rawTextStr, overlay, isKK) {
     const progress = overlay.querySelector('#icProgress');
     const resultCard = overlay.querySelector('#icResultCard');
     const detectedValue = overlay.querySelector('#icDetectedValue');
@@ -1332,59 +417,32 @@ window.ImageCompare = (function () {
     const compareBtn = overlay.querySelector('#icCompareBtn');
     const rawText = overlay.querySelector('#icRawText');
 
-    rawText.textContent = rawTextStr;
+    if (!resultCard || !scoreInput || !compareBtn) return;
 
-    progress.classList.remove('active');
+    if (rawText) rawText.textContent = rawTextStr || '(kein Text erkannt)';
+    if (progress) progress.classList.remove('active');
     resultCard.classList.add('active');
 
-    let exAlt = overlay.querySelector('.ic-alt-chips');
-    if (exAlt) exAlt.remove();
+    if (parsed && parsed.bestMatch) {
+      const value = parsed.bestMatch.value;
+      const displayValue = isKK ? String(Math.floor(value)) : Number(value).toFixed(1);
 
-    if (bestParsed?.bestMatch) {
-      const best = bestParsed.bestMatch;
-      const displayVal = isKK ? Math.floor(best.value) : best.value.toFixed(1);
-      detectedValue.textContent = displayVal;
-      const typeLabel = (best.type === 'decimal') ? 'Dezimalzahl' : 'Ganzzahl';
-      detectedLabel.innerHTML = `Typ: ${ typeLabel } · Konfidenz: ${ Math.round(best.confidence * 100) }% `;
-      scoreInput.value = displayVal;
-      compareBtn.disabled = false;
-
-      // Speichere den erkannten Wert für das Feedback-System
-      overlay.dataset.detectedScore = displayVal;
-
-      // Improvement #4: Alternative-Chips
-      if (bestParsed.alternatives && bestParsed.alternatives.length > 0) {
-        const altContainer = document.createElement('div');
-        altContainer.className = 'ic-alt-chips';
-
-        const lbl = document.createElement('div');
-        lbl.className = 'ic-alt-label';
-        lbl.textContent = 'Alternativen:';
-        lbl.style.width = '100%';
-        altContainer.appendChild(lbl);
-
-        bestParsed.alternatives.forEach((alt) => {
-          const altVal = isKK ? Math.floor(alt.value) : alt.value.toFixed(1);
-          const btn = document.createElement('button');
-          btn.className = 'ic-alt-chip';
-          btn.textContent = altVal;
-          btn.addEventListener('click', () => {
-            scoreInput.value = altVal;
-            detectedValue.textContent = altVal;
-            compareBtn.disabled = false;
-          });
-          altContainer.appendChild(btn);
-        });
-
-        const editHint = overlay.querySelector('.ic-edit-hint');
-        editHint.parentNode.insertBefore(altContainer, editHint);
+      if (detectedValue) detectedValue.textContent = displayValue;
+      if (detectedLabel) {
+        const conf = Math.round((parsed.bestMatch.confidence || 0) * 100);
+        detectedLabel.textContent = 'Erkannt (' + conf + '% Konfidenz)';
       }
+
+      scoreInput.value = displayValue;
+      compareBtn.disabled = false;
+      overlay.dataset.detectedScore = displayValue;
     } else {
-      detectedValue.textContent = '?';
-      detectedLabel.innerHTML = 'Keine Punktzahl erkannt – bitte manuell eingeben';
+      if (detectedValue) detectedValue.textContent = '?';
+      if (detectedLabel) detectedLabel.textContent = 'Keine Punktzahl erkannt - bitte manuell eingeben';
       scoreInput.value = '';
-      scoreInput.focus();
       compareBtn.disabled = true;
+      scoreInput.focus();
+      delete overlay.dataset.detectedScore;
     }
   }
 
@@ -1400,34 +458,40 @@ window.ImageCompare = (function () {
     const detectedLabel = overlay.querySelector('#icDetectedLabel');
     const rawText = overlay.querySelector('#icRawText');
     const rawToggle = overlay.querySelector('#icRawToggle');
-    const altChips = overlay.querySelector('.ic-alt-chips');
-    const previewWrap = uploadZone.querySelector('.ic-preview-wrap');
 
-    // Remove any existing preview
-    if (previewWrap) {
-      previewWrap.remove();
+    if (!uploadZone) return;
+
+    const previewWrap = uploadZone.querySelector('.ic-preview-wrap');
+    if (previewWrap) previewWrap.remove();
+
+    uploadZone.classList.remove('has-image');
+
+    const icon = uploadZone.querySelector('.ic-upload-icon');
+    const text = uploadZone.querySelector('.ic-upload-text');
+    const sub = uploadZone.querySelector('.ic-upload-sub');
+    const input = uploadZone.querySelector('#icFileInput');
+    if (icon) icon.style.display = '';
+    if (text) text.style.display = '';
+    if (sub) sub.style.display = '';
+    if (input) {
+      input.style.display = '';
+      input.value = '';
     }
 
-    // Show original upload elements
-    uploadZone.classList.remove('has-image');
-    uploadZone.querySelector('.ic-upload-icon').style.display = '';
-    uploadZone.querySelector('.ic-upload-text').style.display = '';
-    uploadZone.querySelector('.ic-upload-sub').style.display = '';
-    uploadZone.querySelector('#icFileInput').style.display = ''; // Ensure input is visible
-
-    // Reset visual states
-    progress.classList.remove('active');
-    resultCard.classList.remove('active');
-    compareBtn.disabled = true;
+    if (progress) progress.classList.remove('active');
+    if (resultCard) resultCard.classList.remove('active');
+    if (compareBtn) compareBtn.disabled = true;
     if (btnWrong) btnWrong.style.display = 'block';
     if (editScoreBlock) editScoreBlock.style.display = 'none';
-    if (altChips) altChips.remove();
-    rawText.classList.remove('visible');
-    rawToggle.textContent = '▶ OCR-Rohtext anzeigen';
 
-    // Reset content
-    detectedValue.textContent = '–';
-    detectedLabel.textContent = 'Wird analysiert…';
+    if (rawText) {
+      rawText.classList.remove('visible');
+      rawText.textContent = '';
+    }
+    if (rawToggle) rawToggle.textContent = '▶ OCR-Rohtext anzeigen';
+
+    if (detectedValue) detectedValue.textContent = '–';
+    if (detectedLabel) detectedLabel.textContent = 'Wird analysiert...';
 
     if (scoreInput) {
       scoreInput.value = '';
@@ -1435,98 +499,60 @@ window.ImageCompare = (function () {
       scoreInput.step = isKK ? '1' : '0.1';
       scoreInput.inputMode = isKK ? 'numeric' : 'decimal';
     }
+
+    delete overlay.dataset.detectedScore;
+    delete overlay._currentFile;
   }
 
-  /* ─── KI-FEEDBACK UPLOAD (FORMSPREE) ──────────── */
-  async function sendToFormspree(file, expectedScore, actualScore) {
-    if (!Brain.FEEDBACK_ENABLED || !file) return;
-    if (!Brain.FORMSPREE_ENDPOINT) {
-      console.warn('[ImageCompare] Formspree Endpoint fehlt.');
-      return;
-    }
+  async function sendToFormspree(file, expectedScore, detectedScore) {
+    if (!Brain || !Brain.FEEDBACK_ENABLED || !file || !Brain.FORMSPREE_ENDPOINT) return;
 
     try {
-      console.info(`[ImageCompare] Sende Fehler - Feedback an Formspree...`);
-      const url = `https://formspree.io/f/${Brain.FORMSPREE_ENDPOINT}`;
+      const url = 'https://formspree.io/f/' + Brain.FORMSPREE_ENDPOINT;
+      const formData = new FormData();
+      formData.append('Fehlerbericht', 'KI lag falsch');
+      formData.append('KI_dachte', String(detectedScore));
+      formData.append('Wahrer_Score', String(expectedScore));
+      formData.append('Foto_Upload', file, file.name || 'feedback.jpg');
 
-const formData = new FormData();
-formData.append('Fehlerbericht', 'KI lag falsch');
-formData.append('KI_dachte', actualScore);
-formData.append('Wahrer_Score', expectedScore);
-formData.append('Foto_Upload', file, file.name || 'feedback.jpg');
-
-fetch(url, {
-  method: 'POST',
-  body: formData,
-  headers: {
-    'Accept': 'application/json'
-  }
-}).catch(e => console.warn('[ImageCompare] Formspree-Upload fehlgeschlagen:', e));
+      await fetch(url, {
+        method: 'POST',
+        body: formData,
+        headers: { 'Accept': 'application/json' }
+      });
     } catch (e) {
-  console.warn('[ImageCompare] Formspree-Fehler:', e);
-}
+      console.warn('[ImageCompare] Formspree upload failed:', e);
+    }
   }
 
+  return {
+    init() {
+      injectStyles();
+    },
 
+    open(botScore, isKK, discipline = null) {
+      injectStyles();
+      ensureTesseract().catch(() => { /* lazy failure fallback */ });
 
-/* ─── UTILITIES ──────────────────────────── */
-function delay(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
+      const overlay = createOverlay(botScore || 0, !!isKK);
+      if (!overlay) return;
+      overlay.dataset.discipline = discipline || '';
+    },
 
-/* ─── PUBLIC API ─────────────────────────── */
-return {
-  /**
-   * Initialize: inject CSS styles
-   */
-  init() {
-    injectStyles();
-  },
+    createGameOverButton(container, botScore, isKK, discipline = null) {
+      if (!container) return;
+      injectStyles();
 
-  /**
-   * Open the image upload & comparison overlay.
-   * @param {number} botScore - The bot's total score from the current game
-   * @param {boolean} isKK - Whether the current weapon is KK (integer scoring)
-   * @param {string} discipline - Context string ('LG_40', 'KK_30') to enforce validation limits
-   */
-  open(botScore, isKK, discipline = null) {
-    // Pre-warm: Tesseract + TF.js parallel vorladen
-    ensureTesseract().catch(e => console.warn('[ImageCompare] Tesseract pre-warm fehlgeschlagen:', e));
-    loadTFModel().catch(() => { }); // Modell im Hintergrund laden (Fehler = OK)
-    injectStyles();
-    const overlay = createOverlay(botScore || 0, !!isKK);
-    if (!overlay) return;
-    overlay.dataset.discipline = discipline;
-  },
+      if (container.querySelector('.ic-go-upload-btn')) return;
 
-/**
- * Create a small upload button for the game-over screen
- * @param {HTMLElement} container - The DOM element to insert the button into
- * @param {number} botScore - The bot's total score
- * @param {boolean} isKK - Whether scoring is integer (KK)
- * @param {string} discipline - Context string ('LG_40', 'KK_30') to enforce validation limits
- */
-createGameOverButton(container, botScore, isKK, discipline = null) {
-  // #region agent log
-  fetch('http://127.0.0.1:7658/ingest/29da7a83-0bde-4827-be31-ec2f34b47ad4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cfa0c1'},body:JSON.stringify({sessionId:'cfa0c1',location:'image-compare.js:createGameOverButton',message:'createGameOverButton called',data:{hasContainer:!!container,hasDuplicate:container?!!container.querySelector('.ic-go-upload-btn'):null},hypothesisId:'E',timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
-  if (!container) return;
-  injectStyles();
+      const btn = document.createElement('button');
+      btn.className = 'ic-go-upload-btn';
+      btn.innerHTML = '<span class="ic-go-upload-ico">📷</span> Foto schiessen';
+      btn.addEventListener('click', () => {
+        this.open(botScore, isKK, discipline);
+      });
 
-  // Don't add duplicate buttons
-  if (container.querySelector('.ic-go-upload-btn')) return;
-
-  const btn = document.createElement('button');
-  btn.className = 'ic-go-upload-btn';
-  btn.innerHTML = '<span class="ic-go-upload-ico">📸</span> Foto schießen';
-  btn.addEventListener('click', () => {
-    this.open(botScore, isKK, discipline);
-  });
-
-  container.appendChild(btn);
-  // #region agent log
-  fetch('http://127.0.0.1:7658/ingest/29da7a83-0bde-4827-be31-ec2f34b47ad4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cfa0c1'},body:JSON.stringify({sessionId:'cfa0c1',location:'image-compare.js:createGameOverButton',message:'Button appended',data:{childCount:container.childElementCount},hypothesisId:'F',timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
-}
+      container.appendChild(btn);
+    }
   };
-}) ();
+})();

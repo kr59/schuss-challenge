@@ -1,8 +1,8 @@
-// Schussduell Service Worker
-// Cacht alle lokalen Assets für Offline-Nutzung.
+﻿// Schussduell Service Worker
+// Cacht alle lokalen Assets fÃ¼r Offline-Nutzung.
 // Firebase-Requests werden NICHT gecacht (immer live).
 
-const CACHE_NAME = 'schussduell-v1';
+const CACHE_NAME = 'schussduell-v2';
 
 const PRECACHE = [
   './',
@@ -67,3 +67,4 @@ self.addEventListener('fetch', event => {
     })
   );
 });
+
