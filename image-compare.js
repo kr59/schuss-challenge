@@ -1,74 +1,165 @@
 /* ═══════════════════════════════════════════════════════════════════════
    IMAGE-COMPARE.JS — KI-gestützte Bilderkennung & Ergebnis-Vergleich
-   100% kostenlos · Tesseract.js (Open-Source OCR) · Läuft im Browser
+   100% kostenlos · Tesseract.js + TensorFlow.js · Läuft im Browser
    ═══════════════════════════════════════════════════════════════════════
    Architektur:
-     1. KONFIGURATION   — Alle Konstanten & Schwellwerte zentral
-     2. PREPROCESSING    — Modulare Bild-Pipeline (Graustufen → Schärfung → Threshold)
-     3. OCR-ENGINE       — Tesseract.js Lazy-Loading & Multi-Pass-Erkennung
-     4. SCORE-PARSING    — Regelbasierte Punktzahl-Extraktion mit Gewichtung
-     5. UI-RENDERING     — Overlay, Upload, Fortschritt, Vergleich
-     6. PUBLIC API       — init(), open(), createGameOverButton()
+     1. BRAIN-IMPORT     — Konfiguration aus image-compare-brain.js
+     2. TENSORFLOW.JS    — Monitor-Erkennung & Auto-Crop
+     3. PREPROCESSING    — Modulare Bild-Pipeline (Web Worker)
+     4. OCR-ENGINE       — Tesseract.js Lazy-Loading & Multi-Pass
+     5. SCORE-PARSING    — Regelbasierte Punktzahl-Extraktion
+     6. UI-RENDERING     — Overlay, Upload, Fortschritt, Vergleich
+     7. PUBLIC API       — init(), open(), createGameOverButton()
    ═══════════════════════════════════════════════════════════════════════ */
 
 window.ImageCompare = (function () {
   'use strict';
 
+  /* ═══ 1. BRAIN-IMPORT ═══════════════════════════════════════════════
+     Alle Konstanten kommen aus image-compare-brain.js
+     (muss VOR diesem Script geladen werden)
+     ═══════════════════════════════════════════════════════════════════ */
+  const Brain = window.ImageCompareBrain;
+  if (!Brain) {
+    console.error('[ImageCompare] FEHLER: image-compare-brain.js muss VOR image-compare.js geladen werden!');
+  }
+  const SCORE_CONFIG = Brain.SCORE_CONFIG;
+  const OCR_PASSES = Brain.OCR_PASSES;
+  const cleanOCRText = Brain.cleanOCRText;
+
   /* ─── PRIVATE STATE ──────────────────────── */
   let _isProcessing = false;
 
-  /* ═══ 1. KONFIGURATION ═══════════════════════════════════════════════ */
+  /* ═══ 2. TENSORFLOW.JS — Monitor-Erkennung ═════════════════════════
+     Erkennt ob ein Foto einen Ergebnis-Monitor zeigt und liefert
+     optional eine Bounding Box für Auto-Crop.
+     ═══════════════════════════════════════════════════════════════════ */
 
-  /** Zentrale Score-Konfiguration — alle Schwellwerte an einem Ort */
-  const SCORE_CONFIG = {
-    VALID_RANGE: { min: 10, max: 660 },
+  let _tfModel = null;
+  let _tfLoadFailed = false;
 
-    /* Gewichtungsfaktoren für die Konfidenz-Berechnung */
-    WEIGHTS: {
-      CENTER_FACTOR: 0.5,   // Bonus für Nähe zur Bildmitte
-      KEYWORD_NEAR_BONUS: 1.0,   // Bonus wenn Score nah an Schlüsselwort
-      KEYWORD_MAX_DIST: 15,    // Max. Zeichenabstand für Keyword-Bonus
-      LABELED_TYPE_BONUS: 0.5,   // Bonus für beschriftete Werte
-      FORMAT_MATCH_BONUS: 0.3,   // Bonus wenn Format zur Waffe passt
-      GOOD_GEOMETRY_BONUS: 1.2,   // Bonus für gutes Seitenverhältnis
-      BAD_GEOMETRY_PENALTY: 0.5,  // Malus für unplausibles Seitenverhältnis
-    },
+  /**
+   * Lädt TensorFlow.js on-demand per CDN.
+   * Wird nur aufgerufen wenn ein Modell konfiguriert ist.
+   */
+  function ensureTensorFlow() {
+    return new Promise((resolve, reject) => {
+      if (typeof tf !== 'undefined') { resolve(); return; }
+      if (document.querySelector('script[data-ic-tfjs]')) {
+        const check = setInterval(() => {
+          if (typeof tf !== 'undefined') { clearInterval(check); resolve(); }
+        }, 200);
+        setTimeout(() => { clearInterval(check); reject(new Error('TF.js-Timeout')); }, 30000);
+        return;
+      }
+      const sc = document.createElement('script');
+      sc.src = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js';
+      sc.dataset.icTfjs = '1';
+      sc.onload = () => {
+        const check = setInterval(() => {
+          if (typeof tf !== 'undefined') { clearInterval(check); resolve(); }
+        }, 100);
+        setTimeout(() => { clearInterval(check); reject(new Error('TF.js-Timeout')); }, 15000);
+      };
+      sc.onerror = () => reject(new Error('TensorFlow.js konnte nicht geladen werden.'));
+      document.head.appendChild(sc);
+    });
+  }
 
-    /* Schlüsselwörter die auf einen Gesamtscore hindeuten */
-    KEYWORDS: ['gesamt', 'total', 'summe', 'ergebnis', 'result', 'ringe', 'pkt'],
-
-    /* Plausibles Seitenverhältnis (Höhe/Breite) für Ziffern */
-    GEOMETRY: { MIN: 0.8, MAX: 4.0, GOOD_MIN: 1.2, GOOD_MAX: 2.8 },
-  };
-
-  /** OCR-Zeichenkorrekturen: häufige Fehllesungen von Ziffern */
-  const OCR_CHAR_FIXES = [
-    [/[oO]/g, '0'],
-    [/[lI|]/g, '1'],
-    [/[sS](?=\d)/g, '5'],
-    [/[,]/g, '.'],
-  ];
-
-  /** Multi-Pass-OCR Strategie — jeder Pass hat eigene Vorverarbeitungsparameter */
-  const OCR_PASSES = [
-    { name: 'Standard', options: {}, triggerBelow: 1.0 },
-    { name: 'Gamma-Boost', options: { gamma: 1.5 }, triggerBelow: 0.85 },
-    { name: 'Invertiert', options: { invert: true }, triggerBelow: 0.7 },
-  ];
-
-  /* ─── Textbereinigung (zentral, einmalig definiert) ─── */
-  function cleanOCRText(text) {
-    let clean = text;
-    for (const [pattern, replacement] of OCR_CHAR_FIXES) {
-      clean = clean.replace(pattern, replacement);
+  /**
+   * Lädt das benutzerdefinierte TF-Modell (einmalig, dann gecacht).
+   * ══════════════════════════════════════════════════════════════════
+   * ██  Der Modell-Pfad wird in image-compare-brain.js definiert:  ██
+   * ██  → Brain.MODEL_PATH (Standard: './model/model.json')       ██
+   * ══════════════════════════════════════════════════════════════════
+   */
+  async function loadTFModel() {
+    if (_tfModel) return _tfModel;
+    if (_tfLoadFailed) return null;
+    try {
+      await ensureTensorFlow();
+      // ── Speicher-Optimierung: WebGL-Backend bevorzugen ──
+      await tf.setBackend('webgl');
+      await tf.ready();
+      _tfModel = await tf.loadLayersModel(Brain.MODEL_PATH);
+      console.info('[ImageCompare] TF-Modell geladen:', Brain.MODEL_PATH);
+      return _tfModel;
+    } catch (err) {
+      _tfLoadFailed = true;
+      console.info('[ImageCompare] Monitor-Modell nicht gefunden, überspringe TF-Analyse.', err.message);
+      return null;
     }
-    return clean.replace(/\s+/g, ' ');
+  }
+
+  /**
+   * Prüft ob das Foto einen Ergebnis-Monitor zeigt.
+   * Nutzt tf.tidy() für automatisches Tensor-Cleanup → kein RAM-Leak!
+   *
+   * ═══════════════════════════════════════════════════════════════════
+   * Dein Teachable Machine Modell hat 2 Klassen:
+   *   Index 0 = "Monitor"  (Ergebnis-Anzeige erkannt)
+   *   Index 1 = "Nichts"   (kein Monitor)
+   * Ausgabe ist Softmax: [monitor_prob, nichts_prob]
+   * ═══════════════════════════════════════════════════════════════════
+   *
+   * @param {HTMLImageElement} imgEl — das hochgeladene Bild
+   * @returns {Promise<{isMonitor: boolean, confidence: number, boundingBox: object|null}>}
+   */
+  async function detectMonitor(imgEl) {
+    const model = await loadTFModel();
+    if (!model) {
+      // Kein Modell → Fallback: gehe davon aus, es IST ein Monitor
+      return { isMonitor: true, confidence: 0, boundingBox: null };
+    }
+
+    const inputSize = Brain.MODEL_INPUT_SIZE; // 224 (aus metadata.json)
+
+    // ── Speicher-optimiert: tf.tidy() räumt ALLE Zwischen-Tensoren auf ──
+    const prediction = tf.tidy(() => {
+      // Bild → Tensor (3 Kanäle, uint8)
+      const imgTensor = tf.browser.fromPixels(imgEl);
+      // Resize auf Modell-Eingabegröße (224×224)
+      const resized = tf.image.resizeBilinear(imgTensor, [inputSize, inputSize]);
+      // ── WICHTIG: Teachable Machine / MobileNet Normalisierung ──
+      // Nicht ÷255, sondern ÷127.5 − 1  →  Bereich wird [-1, +1]
+      const normalized = resized.div(127.5).sub(1.0);
+      // Batch-Dimension: [224,224,3] → [1,224,224,3]
+      const batched = normalized.expandDims(0);
+      // Inferenz
+      return model.predict(batched);
+    });
+
+    // Ergebnis auslesen — Softmax [Monitor_prob, Nichts_prob]
+    let result;
+    try {
+      const data = await prediction.data();
+      // data[0] = Wahrsch. "Monitor", data[1] = Wahrsch. "Nichts"
+      const monitorConf = data[0];
+      result = {
+        isMonitor: monitorConf >= Brain.MONITOR_CONFIDENCE_THRESHOLD,
+        confidence: monitorConf,
+        // Teachable Machine liefert keine Bounding Box —
+        // das Modell klassifiziert nur "Monitor" vs. "Nichts"
+        boundingBox: null
+      };
+      console.info(`[ImageCompare] TF-Ergebnis: Monitor=${(monitorConf * 100).toFixed(1)}%, Nichts=${(data[1] * 100).toFixed(1)}%`);
+    } catch (e) {
+      console.warn('[ImageCompare] TF-Inferenz fehlgeschlagen:', e);
+      result = { isMonitor: true, confidence: 0, boundingBox: null };
+    } finally {
+      // ── Speicher: Output-Tensor manuell disposen ──
+      if (Array.isArray(prediction)) prediction.forEach(t => t.dispose());
+      else prediction.dispose();
+    }
+
+    return result;
   }
 
   /* ─── PRIVATE STATE (erweitert) ─── */
   let _worker = null;          // Improvement #2: Worker-Singleton
   const _ocrCache = new Map(); // Improvement #6: OCR-Ergebnis-Cache
   const OCR_CACHE_MAX = 5;
+  const CSS_ID = 'ic-styles';  // ID für das injizierte Stylesheet
 
   function injectStyles() {
     if (document.getElementById(CSS_ID)) return;
@@ -98,7 +189,7 @@ window.ImageCompare = (function () {
     });
 
     await _worker.setParameters({
-      tessedit_char_whitelist: '0123456789., \n',
+      tessedit_char_whitelist: '0123456789., OolI|Ss\n',
       tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT
     });
 
@@ -194,7 +285,7 @@ window.ImageCompare = (function () {
 
   /** Cache-Key aus File-Metadaten generieren */
   function getCacheKey(file) {
-    return `${file.name}_${file.size}_${file.lastModified}`;
+    return `${file.name}_${file.size}_${file.lastModified} `;
   }
 
   /* ─── TESSERACT.JS LAZY LOADING ──────────── */
@@ -242,122 +333,215 @@ window.ImageCompare = (function () {
   function getPrepWorker() {
     if (_prepWorker) return _prepWorker;
     const workerCode = `
-      function toGrayscale(d) {
-        for (let i = 0; i < d.length; i += 4) {
-          const gray = Math.round(d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114);
-          d[i] = d[i+1] = d[i+2] = gray;
-        }
+  function toGrayscale(d) {
+    for (let i = 0; i < d.length; i += 4) {
+      const gray = Math.round(d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
+      d[i] = d[i + 1] = d[i + 2] = gray;
+    }
+  }
+  function applyGamma(d, gamma) {
+    if (!gamma || gamma === 1.0) return;
+    const inv = 1 / gamma;
+    for (let i = 0; i < d.length; i += 4) {
+      const corrected = Math.round(255 * Math.pow(d[i] / 255, inv));
+      d[i] = d[i + 1] = d[i + 2] = corrected;
+    }
+  }
+  // Moiré-Reduktion: Leichter Gaußscher Weichzeichner (sigma≈1.0) vor dem Schärfen
+  // eliminiert Scan-Lines alter Röhrenmonitore und LCD-Flachbildschirme
+  function gaussianBlur(d, w, h, sigma = 1.0) {
+    const r = Math.ceil(sigma * 2);
+    const kernel = [];
+    let sum = 0;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const v = Math.exp(-(dx*dx + dy*dy) / (2 * sigma * sigma));
+        kernel.push({ dx, dy, v });
+        sum += v;
       }
-      function applyGamma(d, gamma) {
-        if (!gamma || gamma === 1.0) return;
-        const inv = 1 / gamma;
-        for (let i = 0; i < d.length; i += 4) {
-          const corrected = Math.round(255 * Math.pow(d[i] / 255, inv));
-          d[i] = d[i+1] = d[i+2] = corrected;
+    }
+    for (let k = 0; k < kernel.length; k++) kernel[k].v /= sum;
+    const out = new Uint8ClampedArray(d.length);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let acc = 0;
+        for (let k = 0; k < kernel.length; k++) {
+          const nx = Math.max(0, Math.min(w - 1, x + kernel[k].dx));
+          const ny = Math.max(0, Math.min(h - 1, y + kernel[k].dy));
+          acc += d[(ny * w + nx) * 4] * kernel[k].v;
         }
+        const i = (y * w + x) * 4;
+        const v = Math.round(Math.max(0, Math.min(255, acc)));
+        out[i] = out[i + 1] = out[i + 2] = v;
+        out[i + 3] = d[i + 3];
       }
-      function sharpen(d, w, h) {
-        const out = new Uint8ClampedArray(d.length);
-        for (let y = 1; y < h - 1; y++) {
-          for (let x = 1; x < w - 1; x++) {
-            const i = (y * w + x) * 4;
-            const val = Math.max(0, Math.min(255,
-              5 * d[i] - d[((y - 1) * w + x) * 4] - d[((y + 1) * w + x) * 4] - d[(y * w + x - 1) * 4] - d[(y * w + x + 1) * 4]
-            ));
-            out[i] = out[i+1] = out[i+2] = val;
-            out[i+3] = 255;
-          }
-        }
-        for (let y = 1; y < h - 1; y++) {
-          for (let x = 1; x < w - 1; x++) {
-            const i = (y * w + x) * 4;
-            d[i] = out[i]; d[i+1] = out[i+1]; d[i+2] = out[i+2];
-          }
-        }
+    }
+    for (let i = 0; i < d.length; i++) d[i] = out[i];
+  }
+  function sharpen(d, w, h) {
+    const out = new Uint8ClampedArray(d.length);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = (y * w + x) * 4;
+        const val = Math.max(0, Math.min(255,
+          5 * d[i] - d[((y - 1) * w + x) * 4] - d[((y + 1) * w + x) * 4] - d[(y * w + x - 1) * 4] - d[(y * w + x + 1) * 4]
+        ));
+        out[i] = out[i + 1] = out[i + 2] = val;
+        out[i + 3] = 255;
       }
-      function stretchContrast(d) {
-        let lo = 255, hi = 0;
-        for (let i = 0; i < d.length; i += 4) {
-          if (d[i] < lo) lo = d[i];
-          if (d[i] > hi) hi = d[i];
-        }
-        const range = hi - lo || 1;
-        for (let i = 0; i < d.length; i += 4) {
-          const v = Math.round(((d[i] - lo) / range) * 255);
-          d[i] = d[i+1] = d[i+2] = v;
-        }
+    }
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = (y * w + x) * 4;
+        d[i] = out[i]; d[i + 1] = out[i + 1]; d[i + 2] = out[i + 2];
       }
-      function invert(d) {
-        for (let i = 0; i < d.length; i += 4) {
-          d[i] = 255 - d[i]; d[i+1] = 255 - d[i+1]; d[i+2] = 255 - d[i+2];
+    }
+  }
+  // Adaptiver Kontrast (CLAHE-Prinzip): Lokale Histogramm-Anpassung pro Tile
+  // Hilft bei spiegelnden Röhrenmonitoren und ungleichmäßiger Beleuchtung
+  function claheContrast(d, w, h, tileSize = 64, clipLimit = 2.0) {
+    const ts = Math.min(tileSize, Math.min(w, h) >> 1);
+    const tw = Math.ceil(w / ts), th = Math.ceil(h / ts);
+    const LUT = [];
+    for (let ty = 0; ty < th; ty++) {
+      for (let tx = 0; tx < tw; tx++) {
+        const x0 = tx * ts, y0 = ty * ts;
+        const x1 = Math.min(x0 + ts, w), y1 = Math.min(y0 + ts, h);
+        const hist = new Uint32Array(256);
+        for (let y = y0; y < y1; y++)
+          for (let x = x0; x < x1; x++)
+            hist[d[(y * w + x) * 4]]++;
+        const total = (x1 - x0) * (y1 - y0);
+        const clip = Math.max(1, Math.floor(total / 256 * clipLimit));
+        let excess = 0;
+        for (let i = 0; i < 256; i++) {
+          if (hist[i] > clip) { excess += hist[i] - clip; hist[i] = clip; }
         }
+        const perBin = Math.floor(excess / 256);
+        for (let i = 0; i < 256; i++) hist[i] += perBin;
+        let sum = 0;
+        const lut = new Uint8Array(256);
+        for (let i = 0; i < 256; i++) {
+          sum += hist[i];
+          lut[i] = Math.round((sum / total) * 255);
+        }
+        LUT.push(lut);
       }
-      function adaptiveThreshold(d, w, h, windowRatio = 8, sensitivity = 0.15) {
-        const S = Math.max(1, Math.round(w / windowRatio));
-        const intImg = new Uint32Array(w * h);
-        for (let x = 0; x < w; x++) {
-          let sum = 0;
-          for (let y = 0; y < h; y++) {
-            const idx = y * w + x;
-            sum += d[idx * 4];
-            intImg[idx] = (x === 0) ? sum : intImg[idx - 1] + sum;
-          }
-        }
-        for (let x = 0; x < w; x++) {
-          for (let y = 0; y < h; y++) {
-            const x1 = Math.max(x - S, 0), x2 = Math.min(x + S, w - 1);
-            const y1 = Math.max(y - S, 0), y2 = Math.min(y + S, h - 1);
-            const count = (x2 - x1 + 1) * (y2 - y1 + 1);
-            const a = (y1 > 0 && x1 > 0) ? intImg[(y1 - 1) * w + (x1 - 1)] : 0;
-            const b = (y1 > 0) ? intImg[(y1 - 1) * w + x2] : 0;
-            const c = (x1 > 0) ? intImg[y2 * w + (x1 - 1)] : 0;
-            const sum = intImg[y2 * w + x2] - b - c + a;
-            const idx = (y * w + x) * 4;
-            const val = (d[idx] * count <= sum * (1.0 - sensitivity)) ? 0 : 255;
-            d[idx] = d[idx+1] = d[idx+2] = val;
-          }
-        }
+    }
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const tx = Math.min(Math.floor(x / ts), tw - 1);
+        const ty = Math.min(Math.floor(y / ts), th - 1);
+        const idx = ty * tw + tx;
+        const i = (y * w + x) * 4;
+        const v = LUT[idx][d[i]];
+        d[i] = d[i + 1] = d[i + 2] = v;
       }
-      function removeNoise(d, w, h, minNeighbors = 2) {
-        const remove = [];
-        for (let y = 1; y < h - 1; y++) {
-          for (let x = 1; x < w - 1; x++) {
-            const idx = (y * w + x) * 4;
-            if (d[idx] === 0) {
-              let neighbors = 0;
-              for (let dy = -1; dy <= 1; dy++) {
-                for (let dx = -1; dx <= 1; dx++) {
-                  if (dx === 0 && dy === 0) continue;
-                  if (d[((y + dy) * w + (x + dx)) * 4] === 0) neighbors++;
-                }
-              }
-              if (neighbors < minNeighbors) remove.push(idx);
+    }
+  }
+  function stretchContrast(d) {
+    let lo = 255, hi = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i] < lo) lo = d[i];
+      if (d[i] > hi) hi = d[i];
+    }
+    const range = hi - lo || 1;
+    for (let i = 0; i < d.length; i += 4) {
+      const v = Math.round(((d[i] - lo) / range) * 255);
+      d[i] = d[i + 1] = d[i + 2] = v;
+    }
+  }
+  function invert(d) {
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = 255 - d[i]; d[i + 1] = 255 - d[i + 1]; d[i + 2] = 255 - d[i + 2];
+    }
+  }
+  function adaptiveThreshold(d, w, h, windowRatio = 8, sensitivity = 0.15) {
+    const S = Math.max(1, Math.round(w / windowRatio));
+    const intImg = new Uint32Array(w * h);
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let y = 0; y < h; y++) {
+        const idx = y * w + x;
+        sum += d[idx * 4];
+        intImg[idx] = (x === 0) ? sum : intImg[idx - 1] + sum;
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      for (let y = 0; y < h; y++) {
+        const x1 = Math.max(x - S, 0), x2 = Math.min(x + S, w - 1);
+        const y1 = Math.max(y - S, 0), y2 = Math.min(y + S, h - 1);
+        const count = (x2 - x1 + 1) * (y2 - y1 + 1);
+        const a = (y1 > 0 && x1 > 0) ? intImg[(y1 - 1) * w + (x1 - 1)] : 0;
+        const b = (y1 > 0) ? intImg[(y1 - 1) * w + x2] : 0;
+        const c = (x1 > 0) ? intImg[y2 * w + (x1 - 1)] : 0;
+        const sum = intImg[y2 * w + x2] - b - c + a;
+        const idx = (y * w + x) * 4;
+        const val = (d[idx] * count <= sum * (1.0 - sensitivity)) ? 0 : 255;
+        d[idx] = d[idx + 1] = d[idx + 2] = val;
+      }
+    }
+  }
+  function removeNoise(d, w, h, minNeighbors = 2) {
+    const remove = [];
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const idx = (y * w + x) * 4;
+        if (d[idx] === 0) {
+          let neighbors = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              if (d[((y + dy) * w + (x + dx)) * 4] === 0) neighbors++;
             }
           }
-        }
-        for (let i = 0; i < remove.length; i++) {
-          const idx = remove[i];
-          d[idx] = d[idx+1] = d[idx+2] = 255;
+          if (neighbors < minNeighbors) remove.push(idx);
         }
       }
+    }
+    for (let i = 0; i < remove.length; i++) {
+      const idx = remove[i];
+      d[idx] = d[idx + 1] = d[idx + 2] = 255;
+    }
+  }
+  // Pixel-Connect: Morphologische Dilation (1px) — verbindet unterbrochene
+  // Segmente von alten LCD/LED-Anzeigen zu durchgehenden Ziffern
+  function dilate(d, w, h, radius = 1) {
+    const r = radius;
+    const out = new Uint8ClampedArray(d.length);
+    for (let i = 0; i < d.length; i++) out[i] = d[i];
+    for (let y = r; y < h - r; y++) {
+      for (let x = r; x < w - r; x++) {
+        const idx = (y * w + x) * 4;
+        let hasBlack = false;
+        for (let dy = -r; dy <= r && !hasBlack; dy++)
+          for (let dx = -r; dx <= r && !hasBlack; dx++)
+            if (d[((y + dy) * w + (x + dx)) * 4] === 0) hasBlack = true;
+        if (hasBlack) out[idx] = out[idx + 1] = out[idx + 2] = 0;
+      }
+    }
+    for (let i = 0; i < d.length; i++) d[i] = out[i];
+  }
 
-      self.onmessage = function(e) {
-        const { id, imageData, w, h, options } = e.data;
-        try {
-          const d = imageData.data;
-          toGrayscale(d);
-          applyGamma(d, options.gamma);
-          sharpen(d, w, h);
-          stretchContrast(d);
-          if (options.invert) invert(d);
-          adaptiveThreshold(d, w, h);
-          removeNoise(d, w, h);
-          self.postMessage({ id, imageData }, [imageData.data.buffer]);
-        } catch (err) {
-          self.postMessage({ id, error: err.message });
-        }
-      };
-    `;
+  self.onmessage = function (e) {
+    const { id, imageData, w, h, options } = e.data;
+    try {
+      const d = imageData.data;
+      toGrayscale(d);
+      applyGamma(d, options.gamma);
+      gaussianBlur(d, w, h, 1.0);
+      sharpen(d, w, h);
+      claheContrast(d, w, h);
+      if (options.invert) invert(d);
+      adaptiveThreshold(d, w, h);
+      removeNoise(d, w, h);
+      dilate(d, w, h, 1);
+      self.postMessage({ id, imageData }, [imageData.data.buffer]);
+    } catch (err) {
+      self.postMessage({ id, error: err.message });
+    }
+  };
+  `;
     const blob = new Blob([workerCode], { type: 'application/javascript' });
     _prepWorker = new Worker(URL.createObjectURL(blob));
     _prepWorker.onmessage = function (e) {
@@ -475,8 +659,8 @@ window.ImageCompare = (function () {
    * Nutzt Word-Level-Daten für exakte Bounding Boxes und Konfidenz.
    * @returns {{ bestMatch, alternatives, allScores } | null}
    */
-  function parseShootingScore(ocrResult, isKK, canvasW, canvasH) {
-    if (!ocrResult?.data?.text) return null;
+  function parseShootingScore(ocrResult, isKK, canvasW, canvasH, discipline = null) {
+    if (!ocrResult || !ocrResult.data || !ocrResult.data.words) return null;
 
     const cleanText = cleanOCRText(ocrResult.data.text);
     const words = ocrResult.data.words || [];
@@ -484,19 +668,47 @@ window.ImageCompare = (function () {
     const candidates = [];
 
     // Quelle 1: Individuelle Wörter mit Bounding-Box-Daten
-    for (const word of words) {
-      const cleaned = cleanOCRText(word.text);
-      const val = parseFloat(cleaned);
-      if (isNaN(val) || val < min || val > max) continue;
+    for (const w of words) {
+      const cleaned = cleanOCRText(w.text);
+      const valDec = parseFloat(cleaned);
+      // Validation Check (Discipline Context)
+      const discConfig = discipline ? SCORE_CONFIG.DISCIPLINES[discipline] : null;
 
-      const type = cleaned.includes('.') ? 'decimal' : 'integer';
-      const geoWeight = calculateGeometryWeight(word.bbox);
-      const ctxWeight = calculateCandidateWeight(word.text, word.bbox, type, isKK, canvasW, canvasH, cleanText);
-      const confidence = (word.confidence / 100) * ctxWeight * geoWeight;
+      if (!isNaN(valDec) && valDec >= SCORE_CONFIG.VALID_RANGE.min && valDec <= SCORE_CONFIG.VALID_RANGE.max) {
+        const typeStr = cleaned.includes('.') ? 'decimal' : 'integer';
+        const geometryConf = calculateGeometryWeight(w.bbox);
+        const rawConf = w.confidence / 100;
 
-      candidates.push({ value: val, type, confidence, bbox: word.bbox });
+        let conf = rawConf * geometryConf;
+        conf *= calculateCandidateWeight(cleaned, w.bbox, typeStr, isKK, canvasW, canvasH, cleanText);
+
+        let isValid = true;
+        if (discConfig) {
+          // 1. Check Range constraints
+          if (valDec < discConfig.min || valDec > discConfig.max) {
+            isValid = false; // Completely ignore values outside expected discipline range
+          }
+          // 2. Format constraint enforcement
+          if (isValid) {
+            if (discConfig.isInteger && typeStr === 'decimal') {
+              conf *= 0.2; // Massive penalty for decimals in KK_30
+            } else if (!discConfig.isInteger && typeStr === 'integer') {
+              conf *= 0.6; // Moderate penalty for integers in LG formats
+            }
+          }
+        }
+
+        if (isValid) {
+          candidates.push({
+            value: valDec,
+            type: typeStr,
+            confidence: conf,
+            bbox: w.bbox,
+            rawWord: cleaned
+          });
+        }
+      }
     }
-
     // Quelle 2: Regex-Suche nach Dezimalzahlen im Gesamttext (Fallback)
     const decRegex = /(\d{2,3})[.,](\d)\b/g;
     let m;
@@ -536,7 +748,7 @@ window.ImageCompare = (function () {
     overlay.id = 'icOverlay';
 
     overlay.innerHTML = `
-      <div class="ic-sheet">
+    < div class="ic-sheet" >
         <div class="ic-handle"></div>
         <div class="ic-header">
           <div class="ic-title">📷 FOTO-ANALYSE</div>
@@ -597,7 +809,7 @@ window.ImageCompare = (function () {
             Es wird nichts hochgeladen. 100% offline & kostenlos.
           </div>
         </div>
-      </div>
+      </div >
     `;
 
     document.body.appendChild(overlay);
@@ -697,6 +909,9 @@ window.ImageCompare = (function () {
     if (_isProcessing) return;
     _isProcessing = true;
 
+    // Grab discipline attached to overlay by open()
+    const discipline = overlay.dataset.discipline || null;
+
     // Improvement #6: OCR-Ergebnis-Cache
     const cacheKey = getCacheKey(file);
     const cachedResult = _ocrCache.get(cacheKey);
@@ -716,11 +931,11 @@ window.ImageCompare = (function () {
 
     uploadZone.classList.add('has-image');
     uploadZone.innerHTML = `
-      <div class="ic-preview-wrap">
-        <img class="ic-preview-img" src="${objectUrl}" alt="Upload" id="icPreviewImg">
+    < div class="ic-preview-wrap" >
+      <img class="ic-preview-img" src="${objectUrl}" alt="Upload" id="icPreviewImg">
         <div class="ic-remove-img" id="icRemoveImg" title="Bild entfernen">✕</div>
       </div>
-    `;
+  `;
     const removeBtn = overlay.querySelector('#icRemoveImg');
     if (removeBtn) {
       removeBtn.addEventListener('click', (ev) => {
@@ -751,13 +966,45 @@ window.ImageCompare = (function () {
         img.src = objectUrl;
       });
 
+      progressFill.style.width = '10%';
+      progressStatus.textContent = '🧠 TensorFlow: Prüfe Monitor-Erkennung…';
+
+      // ═══ TENSORFLOW MONITOR-ERKENNUNG & AUTO-CROP ═══════════════════
+      // Vor der OCR prüfen wir, ob das Bild überhaupt einen Monitor zeigt.
+      // Wenn ja UND eine Bounding Box zurückkommt → Auto-Crop für bessere OCR.
+      let tfCrop = null;
+      const monitorResult = await detectMonitor(img);
+
+      if (!monitorResult.isMonitor) {
+        // Kein Monitor erkannt → Benutzer informieren, aber trotzdem weitermachen
+        progressStatus.textContent = '⚠ Kein Monitor erkannt — versuche trotzdem OCR…';
+        await delay(800);
+      } else if (monitorResult.boundingBox) {
+        // ── Auto-Crop: TF-Modell hat Ergebnis-Bereich erkannt ──
+        // Bounding Box ist normalisiert (0–1), umrechnen auf Pixel
+        const imgW = img.naturalWidth || img.width;
+        const imgH = img.naturalHeight || img.height;
+        const bb = monitorResult.boundingBox;
+        tfCrop = {
+          x: Math.round(bb.x * imgW),
+          y: Math.round(bb.y * imgH),
+          w: Math.round(bb.w * imgW),
+          h: Math.round(bb.h * imgH)
+        };
+        progressStatus.textContent = `✓ Monitor erkannt (${Math.round(monitorResult.confidence * 100)}%) — Auto-Crop aktiv`;
+        await delay(400);
+      } else if (monitorResult.confidence > 0) {
+        progressStatus.textContent = `✓ Monitor erkannt (${Math.round(monitorResult.confidence * 100)}%)`;
+        await delay(300);
+      }
+
       progressFill.style.width = '15%';
       progressStatus.textContent = 'Lade Tesseract.js OCR-Engine…';
 
       _ocrProgressCallback = (prog) => {
         const pct = Math.round(30 + prog * 50);
         progressFill.style.width = pct + '%';
-        progressStatus.textContent = `Texterkennung… ${Math.round(prog * 100)}%`;
+        progressStatus.textContent = `Texterkennung… ${Math.round(prog * 100)}% `;
       };
 
       const worker = await getWorker();
@@ -770,41 +1017,49 @@ window.ImageCompare = (function () {
         let bestResult = null;
         let bestConf = 0;
 
-        // Improvement #3: ROI-Erkennung
-        const roiPrep = await PREPROCESS.run(img, { gamma: 1.0 });
-        const roiCanvas = document.createElement('canvas');
-        const roiCtx = roiCanvas.getContext('2d');
-        const roiImg = new Image();
-        roiImg.src = roiPrep.dataUrl;
-        await new Promise(r => { roiImg.onload = r; });
-        roiCanvas.width = roiPrep.width;
-        roiCanvas.height = roiPrep.height;
-        roiCtx.drawImage(roiImg, 0, 0);
-        const roiCrop = detectROI(roiCtx.getImageData(0, 0, roiPrep.width, roiPrep.height), roiPrep.width, roiPrep.height);
+        // ── Crop-Logik: TF-Crop hat Vorrang, sonst ROI-Fallback ──
+        let crop = tfCrop;
 
-        let crop = null;
-        if (roiCrop) {
-          const scaleX = (img.naturalWidth || img.width) / roiPrep.width;
-          const scaleY = (img.naturalHeight || img.height) / roiPrep.height;
-          crop = {
-            x: roiCrop.x * scaleX,
-            y: roiCrop.y * scaleY,
-            w: roiCrop.w * scaleX,
-            h: roiCrop.h * scaleY
-          };
+        if (!crop) {
+          // Fallback: Klassische ROI-Erkennung (Pixel-Analyse)
+          const roiPrep = await PREPROCESS.run(img, { gamma: 1.0 });
+          const roiCanvas = document.createElement('canvas');
+          const roiCtx = roiCanvas.getContext('2d');
+          const roiImg = new Image();
+          roiImg.src = roiPrep.dataUrl;
+          await new Promise(r => { roiImg.onload = r; });
+          roiCanvas.width = roiPrep.width;
+          roiCanvas.height = roiPrep.height;
+          roiCtx.drawImage(roiImg, 0, 0);
+          const roiCrop = detectROI(roiCtx.getImageData(0, 0, roiPrep.width, roiPrep.height), roiPrep.width, roiPrep.height);
+
+          // ── Speicher: Canvas sofort freigeben ──
+          roiCanvas.width = 0;
+          roiCanvas.height = 0;
+
+          if (roiCrop) {
+            const scaleX = (img.naturalWidth || img.width) / roiPrep.width;
+            const scaleY = (img.naturalHeight || img.height) / roiPrep.height;
+            crop = {
+              x: roiCrop.x * scaleX,
+              y: roiCrop.y * scaleY,
+              w: roiCrop.w * scaleX,
+              h: roiCrop.h * scaleY
+            };
+          }
         }
 
         for (let i = 0; i < OCR_PASSES.length; i++) {
           const pass = OCR_PASSES[i];
           if (bestConf >= pass.triggerBelow) continue;
 
-          progressStatus.textContent = `Analysiere Bild (${pass.name}, Pass ${i + 1}/${OCR_PASSES.length})…`;
+          progressStatus.textContent = `Analysiere Bild(${pass.name}, Pass ${i + 1} / ${OCR_PASSES.length})…`;
           progressFill.style.width = Math.round(30 + (i / OCR_PASSES.length) * 60) + '%';
 
           const prepOptions = { ...pass.options, crop };
           const prep = await PREPROCESS.run(img, prepOptions);
           const result = await worker.recognize(prep.dataUrl);
-          const parsed = parseShootingScore(result, isKK, prep.width, prep.height);
+          const parsed = parseShootingScore(result, isKK, prep.width, prep.height, discipline);
 
           if (parsed?.bestMatch && parsed.bestMatch.confidence > bestConf) {
             bestParsed = parsed;
@@ -813,6 +1068,7 @@ window.ImageCompare = (function () {
           }
         }
 
+        // ── Speicher: Object-URL revoken ──
         URL.revokeObjectURL(objectUrl);
 
         progressFill.style.width = '95%';
@@ -882,7 +1138,7 @@ window.ImageCompare = (function () {
       const displayVal = isKK ? Math.floor(best.value) : best.value.toFixed(1);
       detectedValue.textContent = displayVal;
       const typeLabel = (best.type === 'decimal') ? 'Dezimalzahl' : 'Ganzzahl';
-      detectedLabel.innerHTML = `Typ: ${typeLabel} · Konfidenz: ${Math.round(best.confidence * 100)}%`;
+      detectedLabel.innerHTML = `Typ: ${typeLabel} · Konfidenz: ${Math.round(best.confidence * 100)}% `;
       scoreInput.value = displayVal;
       compareBtn.disabled = false;
 
@@ -931,12 +1187,12 @@ window.ImageCompare = (function () {
 
     uploadZone.classList.remove('has-image');
     uploadZone.innerHTML = `
-      <input type="file" class="ic-upload-input" id="icFileInput"
-             accept="image/*" capture="environment">
+  < input type = "file" class="ic-upload-input" id = "icFileInput"
+accept = "image/*" capture = "environment" >
       <span class="ic-upload-icon">📸</span>
       <div class="ic-upload-text">Foto der Ergebnisanzeige<br>hochladen oder aufnehmen</div>
       <div class="ic-upload-sub">JPG, PNG · Kamera oder Galerie</div>
-    `;
+`;
     progress.classList.remove('active');
     resultCard.classList.remove('active');
     comparison.classList.remove('active');
@@ -965,8 +1221,8 @@ window.ImageCompare = (function () {
       resultEmoji = '🏆';
       resultText = 'DU GEWINNST!';
       diffText = isKK
-        ? `+${Math.round(absDiff)} Ringe Vorsprung`
-        : `+${absDiff.toFixed(1)} Punkte Vorsprung`;
+        ? `+ ${Math.round(absDiff)} Ringe Vorsprung`
+        : `+ ${absDiff.toFixed(1)} Punkte Vorsprung`;
     } else if (diff < -0.05) {
       resultClass = 'lose';
       resultEmoji = '😔';
@@ -990,7 +1246,7 @@ window.ImageCompare = (function () {
     const botDisplay = isKK ? Math.floor(botScore) : botScore.toFixed(1);
 
     comparison.innerHTML = `
-      <div style="text-align:center;font-size:2rem;margin-bottom:-4px;">${resultEmoji}</div>
+  < div style = "text-align:center;font-size:2rem;margin-bottom:-4px;" > ${resultEmoji}</div >
       <div class="ic-comp-title ${resultClass}">${resultText}</div>
       <div class="ic-comp-scores">
         <div class="ic-comp-side">
@@ -1009,11 +1265,11 @@ window.ImageCompare = (function () {
       </div>
       <div class="ic-comp-diff ${resultClass}">${diffText}</div>
 
-      <!-- Submit Button -->
-      <button class="ic-submit-btn" id="icSubmitBtn">
-        ✅ ERGEBNIS ÜBERNEHMEN
-      </button>
-    `;
+      <!--Submit Button-- >
+  <button class="ic-submit-btn" id="icSubmitBtn">
+    ✅ ERGEBNIS ÜBERNEHMEN
+  </button>
+`;
 
     comparison.classList.add('active');
 
@@ -1084,11 +1340,27 @@ window.ImageCompare = (function () {
      * Open the image upload & comparison overlay.
      * @param {number} botScore - The bot's total score from the current game
      * @param {boolean} isKK - Whether the current weapon is KK (integer scoring)
+     * @param {string} discipline - Context string ('LG_40', 'KK_30') to enforce validation limits
      */
-    open(botScore, isKK) {
+    open(botScore, isKK, discipline = null) {
+      // Pre-warm: Tesseract + TF.js parallel vorladen
+      ensureTesseract().catch(e => console.warn('[ImageCompare] Tesseract pre-warm fehlgeschlagen:', e));
+      loadTFModel().catch(() => { }); // Modell im Hintergrund laden (Fehler = OK)
       injectStyles();
       const overlay = createOverlay(botScore || 0, !!isKK);
       overlay.dataset.botScore = botScore || 0;
+      if (discipline) {
+        overlay.dataset.discipline = discipline;
+      }
+
+      const fileInput = overlay.querySelector('#icFileInput');
+      if (fileInput) {
+        fileInput.addEventListener('change', (e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            handleImageFile(e.target.files[0], overlay, botScore, isKK);
+          }
+        });
+      }
     },
 
     /**
@@ -1096,8 +1368,9 @@ window.ImageCompare = (function () {
      * @param {HTMLElement} container - The DOM element to insert the button into
      * @param {number} botScore - The bot's total score
      * @param {boolean} isKK - Whether scoring is integer (KK)
+     * @param {string} discipline - Context string ('LG_40', 'KK_30') to enforce validation limits
      */
-    createGameOverButton(container, botScore, isKK) {
+    createGameOverButton(container, botScore, isKK, discipline = null) {
       if (!container) return;
       injectStyles();
 
@@ -1106,9 +1379,9 @@ window.ImageCompare = (function () {
 
       const btn = document.createElement('button');
       btn.className = 'ic-go-upload-btn';
-      btn.innerHTML = '<span class="ic-go-upload-ico">📷</span> Wettkampf-Foto vergleichen';
+      btn.innerHTML = '<span class="ic-go-upload-ico">�</span> Wettkampf-Foto vergleichen';
       btn.addEventListener('click', () => {
-        ImageCompare.open(botScore, isKK);
+        this.open(botScore, isKK, discipline);
       });
 
       container.appendChild(btn);
