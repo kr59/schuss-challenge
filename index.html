@@ -3770,16 +3770,6 @@
                   <div class="ps-sc-val gold" id="psStat-winrate">–</div>
                   <div class="ps-sc-sub">Siegquote</div>
                 </div>
-                <div class="ps-stat-card">
-                  <div class="ps-sc-label">Ø Score (LG)</div>
-                  <div class="ps-sc-val" id="psStat-lgAvg" style="color:#7ab030;">–</div>
-                  <div class="ps-sc-sub">Zehntel</div>
-                </div>
-                <div class="ps-stat-card">
-                  <div class="ps-sc-label">Ø Score (KK)</div>
-                  <div class="ps-sc-val" id="psStat-kkAvg" style="color:#f0c840;">–</div>
-                  <div class="ps-sc-sub">Ganze</div>
-                </div>
                 <div class="ps-stat-card full">
                   <div class="ps-sc-label">Best Streak</div>
                   <div class="ps-sc-val purple" id="psStat-streak">–</div>
@@ -4461,7 +4451,12 @@
     /* ─── DATA MIGRATION v2 ─── */
     // Alte Daten-Keys bereinigen ohne Username zu löschen
     if (!localStorage.getItem('sd_reset_v2')) {
+      const keepName = localStorage.getItem('sd_username');
+      const keepXP = localStorage.getItem('sd_xp');
+      localStorage.clear();
       localStorage.setItem('sd_reset_v2', 'true');
+      if (keepName) localStorage.setItem('sd_username', keepName);
+      if (keepXP) localStorage.setItem('sd_xp', keepXP);
     }
 
     /* ─── STATE ──────────────────────────────── */
@@ -4707,29 +4702,7 @@
       document.querySelectorAll('.ps-panel').forEach(p => p.classList.toggle('active', p.id === 'psPanel-' + tab));
       if (tab === 'sun') renderSunGrid();
       if (tab === 'history') renderHistory();
-      if (tab === 'stats') {
-        requestAnimationFrame(() => {
-          renderPerformanceChart();
-          updateDetailedStats();
-        });
-      }
-    }
-
-    function updateDetailedStats() {
-      const hist = JSON.parse(localStorage.getItem('sd_history') || '[]');
-      if (hist.length === 0) return;
-
-      const lgGames = hist.filter(h => h.weapon === 'lg');
-      const kkGames = hist.filter(h => h.weapon === 'kk');
-
-      const avg = (arr) => arr.length ? (arr.reduce((a, b) => a + b.playerPts, 0) / arr.length).toFixed(1) : '–';
-
-      // Update micro-stats if elements exist
-      const lgAvgEl = document.getElementById('psStat-lgAvg');
-      if (lgAvgEl) lgAvgEl.textContent = avg(lgGames);
-
-      const kkAvgEl = document.getElementById('psStat-kkAvg');
-      if (kkAvgEl) kkAvgEl.textContent = avg(kkGames);
+      if (tab === 'stats') requestAnimationFrame(() => renderPerformanceChart());
     }
 
     function refreshProfileSheet() {
@@ -4835,12 +4808,6 @@
       // Kleines Delay damit updateWinStreak() zuerst den Cache aktualisiert
       setTimeout(() => pushProfileToFirebase(), 300);
     }
-    /* ─── PERFORMANCE CHART (Chart.js) ──────── */
-
-
-
-
-
 
     /* ─── HISTORY ────────────────────────────── */
     function addHistoryEntry(result, diff, weapon, playerPts, botPts) {

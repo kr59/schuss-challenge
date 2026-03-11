@@ -314,6 +314,14 @@
     const discipline = overlay.dataset.discipline || null;
     const cacheKey = getCacheKey(file);
 
+    const uploadZone = overlay.querySelector('#icUploadZone');
+    const resultCard = overlay.querySelector('#icResultCard');
+
+    if (!uploadZone || !resultCard) {
+      _isProcessing = false;
+      return;
+    }
+
     const objectUrl = URL.createObjectURL(file);
     let revoked = false;
     const safeRevoke = () => {
@@ -322,63 +330,58 @@
       URL.revokeObjectURL(objectUrl);
     };
 
+    uploadZone.classList.add('has-image');
+    const icon = uploadZone.querySelector('.ic-upload-icon');
+    const text = uploadZone.querySelector('.ic-upload-text');
+    const sub = uploadZone.querySelector('.ic-upload-sub');
+    const input = uploadZone.querySelector('#icFileInput');
+    if (icon) icon.style.display = 'none';
+    if (text) text.style.display = 'none';
+    if (sub) sub.style.display = 'none';
+    if (input) input.style.display = 'none';
+
+    const previewWrap = document.createElement('div');
+    previewWrap.className = 'ic-preview-wrap';
+    previewWrap.innerHTML = `
+      <img class="ic-preview-img" src="${objectUrl}" alt="Upload" id="icPreviewImg">
+      <div class="ic-remove-img" id="icRemoveImg" title="Bild entfernen">✕</div>
+    `;
+    uploadZone.appendChild(previewWrap);
+
+    const removeBtn = previewWrap.querySelector('#icRemoveImg');
+    if (removeBtn) {
+      removeBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        safeRevoke();
+        resetUploadZone(overlay, isKK);
+        _isProcessing = false;
+      });
+    }
+
+    const cached = _ocrCache.get(cacheKey);
+    if (cached) {
+      renderOCRResult(cached, cached.rawText || '', overlay, isKK);
+      safeRevoke();
+      _isProcessing = false;
+      return;
+    }
+
+    overlay._currentFile = file;
+
     try {
       updateProgress(overlay, 10, 'Bild wird vorbereitet...');
-
-      // ROI Detection & Preprocessing
-      const croppedImage = await detectAndCropROI(objectUrl);
-      const processingUrl = croppedImage || objectUrl;
-
-      uploadZone.classList.add('has-image');
-      const icon = uploadZone.querySelector('.ic-upload-icon');
-      const text = uploadZone.querySelector('.ic-upload-text');
-      const sub = uploadZone.querySelector('.ic-upload-sub');
-      const input = uploadZone.querySelector('#icFileInput');
-      if (icon) icon.style.display = 'none';
-      if (text) text.style.display = 'none';
-      if (sub) sub.style.display = 'none';
-      if (input) input.style.display = 'none';
-
-      const previewWrap = document.createElement('div');
-      previewWrap.className = 'ic-preview-wrap';
-      previewWrap.innerHTML = `
-        <img class="ic-preview-img" src="${processingUrl}" alt="Upload" id="icPreviewImg">
-        <div class="ic-remove-img" id="icRemoveImg" title="Bild entfernen">✕</div>
-      `;
-      uploadZone.appendChild(previewWrap);
-
-      const removeBtn = previewWrap.querySelector('#icRemoveImg');
-      if (removeBtn) {
-        removeBtn.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          safeRevoke();
-          resetUploadZone(overlay, isKK);
-          _isProcessing = false;
-        });
-      }
-
-      const cached = _ocrCache.get(cacheKey);
-      if (cached) {
-        renderOCRResult(cached, cached.rawText || '', overlay, isKK);
-        safeRevoke();
-        _isProcessing = false;
-        return;
-      }
-
-      overlay._currentFile = file;
-
       resultCard.classList.remove('active');
 
       const worker = await getWorker();
       if (!worker) throw new Error('OCR worker unavailable');
 
-      updateProgress(overlay, 30, 'OCR Engine wird geladen...');
+      updateProgress(overlay, 25, 'OCR Engine wird geladen...');
       _ocrProgressCallback = (prog) => {
-        const pct = Math.round(35 + (prog || 0) * 60);
-        updateProgress(overlay, pct, 'Texterkennung läuft...');
+        const pct = Math.round(30 + (prog || 0) * 60);
+        updateProgress(overlay, pct, 'Texterkennung laeuft...');
       };
 
-      const result = await worker.recognize(processingUrl);
+      const result = await worker.recognize(objectUrl);
       _ocrProgressCallback = null;
 
       const rawText = result && result.data && result.data.text ? result.data.text : '';
@@ -403,112 +406,6 @@
       safeRevoke();
       _isProcessing = false;
     }
-  }
-
-  /**
-   * ROI Detection & Auto-Cropping
-   * Erkennt den hellen Monitor-Bereich und schneidet das Bild darauf zu.
-   */
-  async function detectAndCropROI(imageUrl) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        try {
-          const canvas = document.createElement('canvas');
-          const ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-          // 1. Analyse-Größe (Downsampling für Performance)
-          const scale = Math.min(1, 450 / Math.max(img.width, img.height));
-          const w = Math.floor(img.width * scale);
-          const h = Math.floor(img.height * scale);
-          canvas.width = w;
-          canvas.height = h;
-          ctx.drawImage(img, 0, 0, w, h);
-
-          const imageData = ctx.getImageData(0, 0, w, h);
-          const data = imageData.data;
-
-          // 2. ADAPTIVE SCHWELLENWERT-BERECHNUNG (V3 Peak-Detection)
-          let maxBrightness = 0;
-          const histogram = new Uint32Array(256);
-          for (let i = 0; i < data.length; i += 4) {
-            const b = Math.floor((data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114)); // Luma
-            histogram[b]++;
-            if (b > maxBrightness) maxBrightness = b;
-          }
-
-          // Wir suchen den Schwellenwert: 85% der maximalen Helligkeit
-          // (typisch für leuchtende Zahlen/Monitore auf dunklem Hintergrund)
-          const threshold = Math.max(160, Math.floor(maxBrightness * 0.85));
-
-          let minX = w, minY = h, maxX = 0, maxY = 0;
-          let found = false;
-
-          // 3. Pixel-Cluster finden
-          for (let y = 0; y < h; y++) {
-            for (let x = 0; x < w; x++) {
-              const idx = (y * w + x) * 4;
-              const b = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
-
-              if (b >= threshold) {
-                if (x < minX) minX = x;
-                if (y < minY) minY = y;
-                if (x > maxX) maxX = x;
-                if (y > maxY) maxY = y;
-                found = true;
-              }
-            }
-          }
-
-          if (!found) { resolve(null); return; }
-
-          // 4. Plausibilitäts-Check & Geometrie (V3)
-          let roiW = maxX - minX;
-          let roiH = maxY - minY;
-
-          // Monitor-Ratio Check (Monitore sind meist breiter als hoch)
-          const ratio = roiW / roiH;
-          // Abbruch falls Fläche zu klein (<3% des Bildes) oder Ratio extrem unrealistisch
-          if (ratio < 0.6 || ratio > 3.5 || (roiW * roiH) < (w * h * 0.03)) {
-            resolve(null);
-            return;
-          }
-
-          // Padding: 8% horizontal, 5% vertikal
-          const padW = roiW * 0.08;
-          const padH = roiH * 0.05;
-          minX = Math.max(0, minX - padW);
-          minY = Math.max(0, minY - padH);
-          maxX = Math.min(w, maxX + padW);
-          maxY = Math.min(h, maxY + padH);
-
-          // 5. Finales Rendering (V3 Optimierungen)
-          const finalX = minX / scale;
-          const finalY = minY / scale;
-          const finalW = (maxX - minX) / scale;
-          const finalH = (maxY - minY) / scale;
-
-          const cropCanvas = document.createElement('canvas');
-          cropCanvas.width = finalW;
-          cropCanvas.height = finalH;
-          const cropCtx = cropCanvas.getContext('2d');
-
-          // V3: Hochpräzises Image-Processing für Tesseract OCR
-          // - Kontrast massiv hoch (für klare Ziffernkanten)
-          // - Sättigung ganz raus (Graustufen optimieren OCR)
-          cropCtx.filter = 'contrast(1.6) brightness(1.05) grayscale(1) saturate(0)';
-          cropCtx.drawImage(img, finalX, finalY, finalW, finalH, 0, 0, finalW, finalH);
-
-          resolve(cropCanvas.toDataURL('image/jpeg', 0.88));
-        } catch (e) {
-          console.warn('[ImageCompare] ROI V3 failed:', e);
-          resolve(null);
-        }
-      };
-      img.onerror = () => resolve(null);
-      img.src = imageUrl;
-    });
   }
 
   function renderOCRResult(parsed, rawTextStr, overlay, isKK) {
